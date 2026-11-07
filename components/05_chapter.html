@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="light dark">
+        <title>Chapter 5: Advanced Concurrency Patterns | Go Systems Blueprint</title>
+
+        <!-- Bootstrap 5 CSS -->
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+              rel="stylesheet"
+              integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+              crossorigin="anonymous">
+        
+        <!-- Bootstrap Icons -->
+        <link rel="stylesheet"
+              href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+        <!-- Prism Core Stylesheet for Syntax Highlighting -->
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+
+        <!-- Custom CSS -->
+        <link rel="stylesheet" href="../stylesheets/main.css">
+        <link rel="stylesheet" href="../stylesheets/style.css">
+    </head>
+    <body>
+        <main class="container" style="max-width: 900px;">
+            <header class="text-start mb-5">
+                <div class="mb-3">
+                    <a href="../index.html" class="text-decoration-none small">
+                        <i class="bi bi-arrow-left me-1"></i> Back to Blueprint
+                    </a>
+                </div>
+                <h1 class="display-5 fw-bold mb-3">Chapter 5: Advanced Concurrency Patterns</h1>
+
+                <p class="lead fw-semibold mx-auto">
+                    Building upon the Go M:N Scheduler (GMP model) and core primitives (goroutines and channels),
+                    advanced concurrency patterns allow you to build robust, scalable, and high-performance concurrent applications.
+                    This guide covers essential patterns, implementation strategies, and best practices for avoiding common pitfalls
+                    like goroutine leaks and race conditions.
+                </p>
+            </header>
+
+            <hr class="my-4">
+
+            <!-- Section 5.1 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    5.1 Worker Pool Pattern
+                </h2>
+                <p>
+                    When dealing with a massive number of tasks (e.g., thousands of incoming HTTP requests or file processing jobs),
+                    spawning a new goroutine for every single task can overwhelm the scheduler and exhaust memory.
+                    A Worker Pool limits the number of concurrently executing goroutines to a fixed pool size.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+func worker(workerIndex int, jobChannel <-chan int, resultChannel chan<- int, waitGroup *sync.WaitGroup) {
+	defer waitGroup.Done()
+
+	for currentJob := range jobChannel {
+		fmt.Printf("Worker %d started job %d\n", workerIndex, currentJob)
+
+		time.Sleep(time.Millisecond * 500) // Simulate heavy work.
+		resultChannel <- currentJob * 2
+
+		fmt.Printf("Worker %d finished job %d\n", workerIndex, currentJob)
+	}
+}
+
+func main() {
+	const numberOfJobs = 5
+	const numberOfWorkers = 3
+
+	jobChannel := make(chan int, numberOfJobs)
+	resultChannel := make(chan int, numberOfJobs)
+
+	var waitGroup sync.WaitGroup
+
+	// Start workers.
+	for workerIndex := 1; workerIndex <= numberOfWorkers; workerIndex++ {
+		waitGroup.Add(1)
+		go worker(workerIndex, jobChannel, resultChannel, &waitGroup)
+	}
+
+	// Send jobs.
+	for jobIndex := 1; jobIndex <= numberOfJobs; jobIndex++ {
+		jobChannel <- jobIndex
+	}
+
+	close(jobChannel) // Signal workers that no more jobs are coming.
+
+	// Wait for all workers to finish and close results.
+	waitGroup.Wait()
+	close(resultChannel)
+
+	// Collect results.
+	for processedResult := range resultChannel {
+		fmt.Printf("Result: %d\n", processedResult)
+	}
+}</code></pre>
+
+                <!-- Media-adaptive Worker Pool Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 5.1: Worker Pool Concurrency Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/worker-pool-concurrency-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/worker-pool-concurrency-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/worker-pool-concurrency-light.png" alt="Worker Pool Concurrency Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 5.2 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    5.2 Fan-Out / Fan-In Pattern
+                </h2>
+                <ul>
+                    <li class="mb-2"><strong>Fan Out:</strong> Multiple goroutines read concurrently from a shared input channel. Go's channel semantics naturally handle load distribution: whichever worker becomes available first grabs the next available unit of work from the queue. This prevents bottlenecks and maximizes throughput.</li>
+                    <li class="mb-2"><strong>Fan In:</strong> Multiple discrete output channels produced by individual workers are merged into a single consolidated channel. This allows a downstream consumer to range over a single unified stream without needing to manage multiple channels manually.</li>
+                </ul>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+// generator creates the initial stream of raw data (Fan-Out source).
+func generator(numberOfJobs int) <-chan int {
+	outChannel := make(chan int, numberOfJobs)
+	go func() {
+		defer close(outChannel)
+
+		for jobIndex := 1; jobIndex <= numberOfJobs; jobIndex++ {
+			outChannel <- jobIndex
+		}
+	}()
+
+	return outChannel
+}
+
+// worker processes items from the input channel (Fan-Out workers).
+func worker(workerIndex int, inputStream <-chan int) <-chan int {
+	outputStream := make(chan int)
+
+	go func() {
+		defer close(outputStream)
+
+		for currentJob := range inputStream {
+			fmt.Printf("Worker %d processing job %d\n", workerIndex, currentJob)
+			time.Sleep(time.Millisecond * 400) // Simulate processing time.
+
+			outputStream <- currentJob * 2     // Transformation step.
+		}
+	}()
+
+	return outputStream
+}
+
+// merge multiplexes multiple worker channels into a single unified channel (Fan-In).
+func merge(channels ...<-chan int) <-chan int {
+	var waitGroup sync.WaitGroup
+	unifiedStream := make(chan int)
+
+	// Internal function to copy values from a worker channel to the unified stream.
+	output := func(ch <-chan int) {
+		defer waitGroup.Done()
+
+		for value := range ch {
+			unifiedStream <- value
+		}
+	}
+
+	waitGroup.Add(len(channels))
+
+	for _, channel := range channels {
+		go output(channel)
+	}
+
+	// Goroutine to close the unified stream once all workers have finished.
+	go func() {
+		waitGroup.Wait()
+		close(unifiedStream)
+	}()
+
+	return unifiedStream
+}
+
+func main() {
+	const numberOfJobs = 6
+	const numberOfWorkers = 3
+
+	// 1. Setup Producer Stage.
+	rawJobs := generator(numberOfJobs)
+
+	// 2. Fan-Out: Spawn multiple worker goroutines reading from the same input.
+	var workerChannels []<-chan int
+
+	for workerIndex := 1; workerIndex <= numberOfWorkers; workerIndex++ {
+		workerChannels = append(workerChannels, worker(workerIndex, rawJobs))
+	}
+
+	// 3. Fan-In: Merge all worker output channels into a single stream.
+	finalResults := merge(workerChannels...)
+
+	// 4. Consume the unified stream.
+	for processedResult := range finalResults {
+		fmt.Printf("Received Result: %d\n", processedResult)
+	}
+}</code></pre>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 5.3 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    5.3 Pipeline Pattern
+                </h2>
+                <p>
+                    A pipeline is a series of stages connected by channels, where each stage is a group of goroutines
+                    running the same function. Data flows downstream through each transformation step.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"fmt"
+)
+
+// generatorStage produces the initial stream of numbers.
+func generatorStage(numberOfJobs int) <-chan int {
+	outChannel := make(chan int)
+
+	go func() {
+		// Ensure the channel closes when the generator finishes sending jobs.
+		defer close(outChannel)
+
+		for jobIndex := 1; jobIndex <= numberOfJobs; jobIndex++ {
+			outChannel <- jobIndex
+		}
+	}()
+
+	return outChannel
+}
+
+// squareStage reads numbers from the input channel, squares them, and sends them downstream.
+func squareStage(inputStream <-chan int) <-chan int {
+	outChannel := make(chan int)
+
+	go func() {
+		// Ensure the output channel closes when all input values are processed.
+		defer close(outChannel)
+
+		for currentJob := range inputStream {
+			outChannel <- currentJob * currentJob
+		}
+	}()
+
+	return outChannel
+}
+
+// multiplyStage reads squared numbers, multiplies them by two, and sends them downstream.
+func multiplyStage(inputStream <-chan int) <-chan int {
+	outChannel := make(chan int)
+
+	go func() {
+		// Ensure the output channel closes when all input values are processed.
+		defer close(outChannel)
+
+		for currentJob := range inputStream {
+			outChannel <- currentJob * 2
+		}
+	}()
+
+	return outChannel
+}
+
+func main() {
+	const numberOfJobs = 5
+
+	// Stage 1: Generate the raw input data stream.
+	firstStageChannel := generatorStage(numberOfJobs)
+
+	// Stage 2: Transform raw numbers by squaring them.
+	secondStageChannel := squareStage(firstStageChannel)
+
+	// Stage 3: Transform squared numbers by multiplying them by two.
+	thirdStageChannel := multiplyStage(secondStageChannel)
+
+	// Consume and print the final results from the pipeline terminal.
+	for finalResult := range thirdStageChannel {
+		fmt.Printf("Pipeline Result: %d\n", finalResult)
+	}
+}</code></pre>
+
+                <!-- Media-adaptive Pipeline Pattern Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 5.3: Multi-Stage Data Pipeline Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/pipeline-pattern-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/pipeline-pattern-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/pipeline-pattern-light.png" alt="Pipeline Pattern Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 5.4 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    5.4 Context Cancellation & Timeout Propagation
+                </h2>
+                <p>
+                    Using the <code>context</code> package is vital for controlling execution lifecycles.
+                    It ensures that when a parent operation is canceled, times out, or fails, all child goroutines
+                    are instantly notified to abort their work and free up resources.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// performDatabaseQuery simulates a long-running operation that respects context cancellation.
+func performDatabaseQuery(requestContext context.Context, operationDuration time.Duration, resultChannel chan<- string) {
+	// Simulate work using a time delay channel.
+	simulationTimer := time.NewTimer(operationDuration)
+
+	defer simulationTimer.Stop()
+
+	select {
+	case <-requestContext.Done():
+		// The context was canceled, timed out, or parent finished. Abort work immediately.
+		resultChannel <- fmt.Sprintf("Operation aborted: %v", requestContext.Err())
+
+		return
+	case <-simulationTimer.C:
+		// The operation completed successfully before any timeout occurred.
+		resultChannel <- "Operation completed successfully."
+
+		return
+	}
+}
+
+func main() {
+	// Define a timeout duration for the operation lifecycle.
+	const operationTimeout = time.Second * 2
+
+	// Create a parent background context.
+	parentContext := context.Background()
+
+	// Derive a child context that automatically cancels after the specified timeout.
+	timedContext, cancelFunction := context.WithTimeout(parentContext, operationTimeout)
+
+	// Ensure resources associated with this context are released when main exits.
+	defer cancelFunction()
+
+	// Create a channel to receive the operation result.
+	resultChannel := make(chan string, 1)
+
+	// Simulate a task that takes longer than the timeout threshold (e.g., 3 seconds).
+	const simulatedWorkDuration = time.Second * 3
+
+	// Launch the worker goroutine passing the timed context.
+	go performDatabaseQuery(timedContext, simulatedWorkDuration, resultChannel)
+
+	// Wait for either the operation result or the context cancellation signal.
+	select {
+	case operationResult := <-resultChannel:
+		// Print the outcome received from the worker goroutine.
+		fmt.Println(operationResult)
+	case <-timedContext.Done():
+		// Handle the timeout event triggered by the context deadline.
+		fmt.Printf("Main routine detected timeout: %v\n", timedContext.Err())
+	}
+
+	// Give background goroutines a brief moment to clean up logs before termination.
+	time.Sleep(time.Millisecond * 100)
+}</code></pre>
+
+                <!-- Media-adaptive Context Cancellation Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 5.4: Context Cancellation & Timeout Propagation</p>
+                    <picture>
+                        <source srcset="../documents/images/context-cancellation-and-timeout-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/context-cancellation-and-timeout-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/context-cancellation-and-timeout-light.png" alt="Context Cancellation Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 5.5 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    5.5 Rate Limiting & Throttling
+                </h2>
+                <p>
+                    Controlling throughput prevents services from being overwhelmed. Using <code>time.Ticker</code>
+                    or buffered channels enables leaky bucket or token bucket rate limiting.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	const numberOfRequests = 5
+
+	// Create a buffered channel to hold available tokens for rate limiting.
+	tokenBucketChannel := make(chan struct{}, 3)
+
+	// Fill the token bucket initially up to its maximum capacity.
+	for tokenIndex := 0; tokenIndex < 3; tokenIndex++ {
+		tokenBucketChannel <- struct{}{}
+	}
+
+	// Start a background ticker to refill tokens at a fixed interval.
+	rateLimiterTicker := time.NewTicker(time.Millisecond * 400)
+
+	// Ensure the ticker resources are released when main exits.
+	defer rateLimiterTicker.Stop()
+
+	// Refill tokens concurrently in the background.
+	go func() {
+		for range rateLimiterTicker.C {
+			select {
+			case tokenBucketChannel <- struct{}{}:
+				// Successfully added a token back to the bucket.
+			default:
+				// Token bucket is already full, skip adding new token.
+			}
+		}
+	}()
+
+	// Simulate handling incoming requests subject to rate limiting.
+	for requestIndex := 1; requestIndex <= numberOfRequests; requestIndex++ {
+		// Wait to acquire a token from the bucket before processing the request.
+		<-tokenBucketChannel
+
+		fmt.Printf("Processing request %d at %v\n", requestIndex, time.Now().Format("15:04:05.000"))
+	}
+}</code></pre>
+
+                <!-- Media-adaptive Rate Limiter Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 5.5: Token Bucket Rate Limiter Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/rate-limiter-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/rate-limiter-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/rate-limiter-light.png" alt="Rate Limiter Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 5.6 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    5.6 Best Practices & Common Pitfalls
+                </h2>
+                <ul>
+                    <li class="mb-2">Never start a goroutine without knowing how it will stop. (Prevent goroutine leaks).</li>
+                    <li class="mb-2">Always close channels from the sender side, never the receiver side.</li>
+                    <li class="mb-0">Use the race detector (<code>go test -race</code> / <code>go run -race</code>) during development and testing.</li>
+                </ul>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Key Takeaways Callout -->
+            <div class="card bg-body-tertiary border shadow-sm rounded-3 mb-4 p-4">
+                <h5 class="fw-bold mb-3">
+                    <i class="bi bi-journal-code me-2"></i>Key Takeaways
+                </h5>
+                <ul class="mb-0">
+                    <li class="mb-2">
+                        <strong>Worker Pools:</strong> Bound resource consumption and prevent scheduler exhaustion
+                        by distributing tasks across a fixed set of persistent worker goroutines.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Fan-Out / Fan-In:</strong> Maximize throughput by distributing load across multiple concurrent
+                        workers and cleanly merging their output streams into a single unified consumer channel.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Pipelines:</strong> Structure multi-stage data transformations modularly using connected
+                        producer-consumer channels.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Context Propagation:</strong> Propagate cancellation signals and strict deadlines down call
+                        stacks to eliminate zombie goroutines and wasted computation.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Throttling & Rate Limiting:</strong> Use buffered channels as token buckets paired with tickers
+                        to control request ingestion rates smoothly.
+                    </li>
+                    <li class="mb-0">
+                        <strong>Safety & Diagnostics:</strong> Always define exit strategies for goroutines, close channels
+                        on the sender side, and run tests with the built-in race detector enabled.
+                    </li>
+                </ul>
+            </div>
+        </main>
+
+        <!-- Bootstrap 5 JavaScript Bundle -->
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+                integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+                crossorigin="anonymous"></script>
+
+        <!-- Prism.js Core & Auto-Loader for Go Syntax Support -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+    </body>
+</html>
