@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="light dark">
+        <title>Chapter 14: macOS System Programming & Darwin Kernel Integrations | Go Systems Blueprint</title>
+
+        <!-- Bootstrap 5 CSS -->
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+              rel="stylesheet"
+              integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+              crossorigin="anonymous">
+        
+        <!-- Bootstrap Icons -->
+        <link rel="stylesheet"
+              href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+        <!-- Prism Core Stylesheet for Syntax Highlighting -->
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+
+        <!-- Custom CSS -->
+        <link rel="stylesheet" href="../stylesheets/main.css">
+        <link rel="stylesheet" href="../stylesheets/style.css">
+    </head>
+    <body>
+        <main class="container" style="max-width: 900px;">
+            <header class="text-start mb-5">
+                <div class="d-flex align-items-center mb-3">
+                    <div style="width: 60px; height: 60px; flex-shrink: 0;">
+                        <canvas id="golang-canvas" style="display: block; width: 100%; height: 100%;"></canvas>
+                    </div>
+                    <h1 class="display-5 fw-bold mb-0">macOS System Programming</h1>
+                </div>
+
+                <p class="lead fw-semibold mx-auto">
+                    While cross-platform Go code relies on standard library abstractions, advanced macOS system daemons, virtualization tools,
+                    and performance monitors require deep integration with the Darwin kernel. Underneath the familiar POSIX/BSD userland lies
+                    the XNU (X is Not Unix) hybrid architecture, combining the Mach microkernel primitives with BSD process management,
+                    virtual memory, and networking subsystems.
+                </p>
+                <p class="small">
+                    For senior systems engineers, leveraging Darwin-specific capabilities means stepping past standard Go packages to interface
+                    directly with Mach ports, CoreFoundation/Grand Central Dispatch (GCD) concurrency models, and optimized sysctl interfaces.
+                    This chapter establishes the patterns required to build lightning-fast, native macOS system tools without incurring
+                    unnecessary Cgo performance penalties.
+                </p>
+
+                <!-- Callout Box for Chapter Objectives with alert-purple class -->
+                <div class="card bg-body-tertiary border shadow-sm rounded-3 mt-4 p-4" role="alert">
+                    <h5 class="alert-heading fw-bold mb-3">
+                        <i class="bi bi-info-circle me-2"></i>Chapter Objectives
+                    </h5>
+                    <ul class="mb-0">
+                        <li class="mb-2">Deconstruct the XNU hybrid kernel architecture powering macOS (Mach microkernel base + BSD subsystem).</li>
+                        <li class="mb-2">Master low-level Darwin POSIX APIs and low-overhead Cgo boundary crossings.</li>
+                        <li class="mb-2">Interface directly with Mach ports and process task ports for advanced system introspection.</li>
+                        <li class="mb-0">Implement zero-allocation system call wrappers and memory-mapped IPC routines optimized for Apple Silicon (M-series) memory models.</li>
+                    </ul>
+                </div>
+            </header>
+
+            <hr class="my-4">
+
+            <!-- Section 14.1 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    14.1 Introduction: Beyond Standard POSIX on macOS
+                </h2>
+                <p>
+                    While cross-platform Go code relies on standard library abstractions, advanced macOS system daemons, virtualization tools,
+                    and performance monitors require deep integration with the Darwin kernel. Underneath the familiar POSIX/BSD userland lies
+                    the XNU (X is Not Unix) hybrid architecture, combining the Mach microkernel primitives with BSD process management,
+                    virtual memory, and networking subsystems.
+                </p>
+                <p>
+                    For senior systems engineers, leveraging Darwin-specific capabilities means stepping past standard Go packages to interface
+                    directly with Mach ports, CoreFoundation/Grand Central Dispatch (GCD) concurrency models, and optimized sysctl interfaces.
+                    This chapter establishes the patterns required to build lightning-fast, native macOS system tools without incurring
+                    unnecessary Cgo performance penalties.
+                </p>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 14.2 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    14.2 Darwin Architectural Primitives: Mach vs. BSD
+                </h2>
+                <p>
+                    To build high-performance native macOS services, we must understand the dual-nature of the Darwin kernel:
+                </p>
+
+                <div class="table-responsive my-4">
+                    <table class="table table-bordered table-striped align-middle">
+                        <thead>
+                            <tr>
+                                <th>Subsystem</th>
+                                <th>Primary Responsibility</th>
+                                <th>Go / Systems Integration Vector</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Mach Microkernel</strong></td>
+                                <td>IPC, threads, task management, virtual memory</td>
+                                <td>Mach ports (<code>mach_port_t</code>), task introspection</td>
+                            </tr>
+                            <tr>
+                                <td><strong>BSD Layer</strong></td>
+                                <td>POSIX compliance, processes, file descriptors, sockets</td>
+                                <td><code>sys/sysctl.h</code>, <code>kqueue</code>, file descriptor passing</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Grand Central Dispatch (GCD)</strong></td>
+                                <td>Task scheduling, dispatch queues</td>
+                                <td>Cgo interop with <code>dispatch_async</code> / queues</td>
+                            </tr>
+                            <tr>
+                                <td><strong>I/O Kit</strong></td>
+                                <td>Hardware device drivers and power management</td>
+                                <td>Device discovery and driver communication</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 14.3 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    14.3 Architectural Blueprint: Zero-Copy Cgo & Kernel Bridging
+                </h2>
+                <p>
+                    Bridging Go and the Darwin kernel via Cgo introduces potential overhead due to pointer passing rules and context switching.
+                    A production-grade architecture enforces:
+                </p>
+                <ul>
+                    <li class="mb-2"><strong>Pinned Memory Buffers:</strong> Avoiding garbage collector movement during kernel data exchanges.</li>
+                    <li class="mb-2"><strong>Direct Sysctl Introspection:</strong> Fetching kernel metrics (CPU topology, memory pressure) via flat C-struct mappings.</li>
+                    <li class="mb-0"><strong>Mach Port Message Passing:</strong> Utilizing asynchronous IPC ports for low-latency inter-process communication.</li>
+                </ul>
+
+                <!-- Media-adaptive macOS System Programming Architecture Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 14.3: macOS System Programming Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/macos-system-programming-architecture-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/macos-system-programming-architecture-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/macos-system-programming-architecture-light.png" alt="macOS System Programming Architecture Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 14.4 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    14.4 Production Code: Zero-Allocation Darwin Sysctl Introspection
+                </h2>
+                <p>
+                    The following implementation demonstrates how to query low-level Darwin hardware and kernel metrics (such as CPU frequency
+                    or system state) using Cgo and raw system calls with zero heap allocations:
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">//go:build darwin
+
+package main
+
+import (
+	"fmt"
+	"log"
+	"unsafe"
+)
+
+/*
+#include <sys/sysctl.h>
+#include <stddef.h>
+
+// Helper wrapper to fetch integer sysctl values safely with zero-allocation.
+static int get_system_mib_int(const char *mib_name, int *out_value) {
+    size_t length = sizeof(int);
+
+    return sysctlbyname(mib_name, out_value, &length, NULL, 0);
+}
+*/
+import "C"
+
+func main() {
+	log.Printf("Initializing Darwin Kernel Introspection Engine...")
+
+	// 1. Query CPU frequency or core count via sysctl MIB.
+	var cpuFrequency int
+
+	mibNameCString := C.CString("hw.cpufrequency")
+
+	defer C.free(unsafe.Pointer(mibNameCString))
+
+	resultCode := C.get_system_mib_int(mibNameCString, (*C.int)(unsafe.Pointer(&cpuFrequency)))
+
+	if resultCode != 0 {
+		log.Printf("[-] Warning: failed to query hw.cpufrequency, falling back to logical processor count")
+		fetchLogicalProcessorCount()
+		return
+	}
+
+	fmt.Printf("[+] Darwin Kernel Metric — CPU Frequency: %d Hz\n", cpuFrequency)
+}
+
+func fetchLogicalProcessorCount() {
+	var processorCount int
+
+	mibNameCString := C.CString("hw.logicalcpu")
+
+	defer C.free(unsafe.Pointer(mibNameCString))
+
+	resultCode := C.get_system_mib_int(mibNameCString, (*C.int)(unsafe.Pointer(&processorCount)))
+
+	if resultCode != 0 {
+		log.Fatalf("failed to query logical CPU count from Darwin kernel")
+	}
+
+	fmt.Printf("[+] Darwin Kernel Metric — Logical CPUs: %d\n", processorCount)
+}</code></pre>
+
+                <!-- Media-adaptive Darwin Sysctl Architecture Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 14.4: Darwin Sysctl Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/darwin-sysctl-architecture-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/darwin-sysctl-architecture-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/darwin-sysctl-architecture-light.png" alt="Darwin Sysctl Architecture Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 14.5 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    14.5 Production Code: Low-Level Mach Task Memory Introspection
+                </h2>
+                <p>
+                    Unlike Linux, where process introspection relies heavily on reading pseudo-files under <code>/proc/[pid]/statm</code>,
+                    macOS delegates process lifecycle and resource attributes to the Mach microkernel. Using the <code>mach_task_self()</code>
+                    primitive and the <code>task_info</code> system call, a native Go daemon can inspect its own precise memory footprint
+                    (such as Resident Set Size and virtual memory allocation) with sub-microsecond performance.
+                </p>
+                <p>
+                    The following implementation uses Cgo to query the Darwin kernel via <code>TASK_BASIC_INFO</code> with zero heap allocations:
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">//go:build darwin
+
+package main
+
+import (
+	"fmt"
+	"log"
+	"unsafe"
+)
+
+/*
+#include <mach/mach.h>
+#include <mach/task_info.h>
+
+// Helper function to extract advanced task virtual memory statistics using TASK_VM_INFO.
+static int fetch_advanced_mach_task_vm_statistics(
+    unsigned long long *out_virtual_size_bytes,
+    unsigned long long *out_resident_peak_bytes,
+    unsigned long long *out_compressed_bytes,
+    unsigned long long *out_physical_footprint_bytes
+) {
+    struct task_vm_info taskVirtualMemoryInformationStructure;
+    mach_msg_type_number_t taskInformationMessageCount = TASK_VM_INFO_COUNT;
+    
+    kern_return_t kernelReturnCode = task_info(
+        mach_task_self(), 
+        TASK_VM_INFO, 
+        (task_info_t)&taskVirtualMemoryInformationStructure, 
+        &taskInformationMessageCount
+    );
+
+    if (kernelReturnCode != KERN_SUCCESS) {
+        return (int)kernelReturnCode;
+    }
+
+    *out_virtual_size_bytes = (unsigned long long)taskVirtualMemoryInformationStructure.virtual_size;
+    *out_resident_peak_bytes = (unsigned long long)taskVirtualMemoryInformationStructure.resident_size_peak;
+    *out_compressed_bytes = (unsigned long long)taskVirtualMemoryInformationStructure.compressed;
+    *out_physical_footprint_bytes = (unsigned long long)taskVirtualMemoryInformationStructure.phys_footprint;
+
+    return 0;
+}
+*/
+import "C"
+
+func main() {
+	log.Printf("Initializing Advanced Mach Task VM Introspection Engine...")
+
+	var virtualSizeInBytes uint64
+	var residentPeakSizeInBytes uint64
+	var compressedMemoryInBytes uint64
+	var physicalFootprintInBytes uint64
+
+	kernelOperationResultCode := C.fetch_advanced_mach_task_vm_statistics(
+		(*C.ulong_long)(unsafe.Pointer(&virtualSizeInBytes)),
+		(*C.ulong_long)(unsafe.Pointer(&residentPeakSizeInBytes)),
+		(*C.ulong_long)(unsafe.Pointer(&compressedMemoryInBytes)),
+		(*C.ulong_long)(unsafe.Pointer(&physicalFootprintInBytes)),
+	)
+
+	if kernelOperationResultCode != 0 {
+		log.Fatalf("failed to query advanced Mach task VM info, kernel return code: %d", kernelOperationResultCode)
+	}
+
+	fmt.Printf("[+] Advanced Mach Metric — Total Virtual Size:       %.2f MB\n", float64(virtualSizeInBytes)/(1024*1024))
+	fmt.Printf("[+] Advanced Mach Metric — Peak Resident Size (RSS):  %.2f MB\n", float64(residentPeakSizeInBytes)/(1024*1024))
+	fmt.Printf("[+] Advanced Mach Metric — Compressed Memory Size:    %.2f MB\n", float64(compressedMemoryInBytes)/(1024*1024))
+	fmt.Printf("[+] Advanced Mach Metric — Total Physical Footprint:  %.2f MB\n", float64(physicalFootprintInBytes)/(1024*1024))
+}</code></pre>
+
+                <!-- Media-adaptive Mach Task VM Introspection Architecture Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 14.5: Mach Task VM Introspection Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/mach-task-vm-introspection-architecture-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/mach-task-vm-introspection-architecture-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/mach-task-vm-introspection-architecture-light.png" alt="Mach Task VM Introspection Architecture Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 14.6 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    14.6 Production Code: Global Host Memory Statistics (<code>host_statistics64</code>)
+                </h2>
+                <p>
+                    While task introspection measures a single application's footprint, system-wide daemons and hypervisors must inspect global hardware
+                    resource distribution. On macOS, global memory telemetry is managed by the Mach host port via the <code>host_statistics64</code> system call.
+                </p>
+                <p>
+                    The following implementation queries global memory pages (Free, Active, Wired, and Compressed) across the entire operating system
+                    with zero heap allocations, dynamically reading the kernel's hardware page size:
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">//go:build darwin
+
+package main
+
+import (
+	"fmt"
+	"log"
+	"unsafe"
+)
+
+/*
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#include <mach/vm_statistics.h>
+
+// Helper to safely query global host virtual memory statistics from the Mach host port.
+static int fetch_darwin_host_virtual_memory_statistics(
+    unsigned long long *out_free_memory_bytes, 
+    unsigned long long *out_active_memory_bytes, 
+    unsigned long long *out_wired_memory_bytes, 
+    unsigned long long *out_compressed_memory_bytes
+) {
+    mach_port_t hostPortIdentifier = mach_host_self();
+    vm_statistics64_data_t virtualMemoryStatisticsDataStructure;
+    mach_msg_type_number_t hostInformationMessageCount = HOST_VM_INFO64_COUNT;
+    
+    kern_return_t kernelReturnCode = host_statistics64(
+        hostPortIdentifier, 
+        HOST_VM_INFO64, 
+        (host_info64_t)&virtualMemoryStatisticsDataStructure, 
+        &hostInformationMessageCount
+    );
+    
+    if (kernelReturnCode != KERN_SUCCESS) {
+        return (int)kernelReturnCode;
+    }
+
+    vm_size_t systemMemoryPageSizeInBytes;
+    if (host_page_size(hostPortIdentifier, &systemMemoryPageSizeInBytes) != KERN_SUCCESS) {
+        systemMemoryPageSizeInBytes = 4096; // Standard fallback page size
+    }
+
+    // Convert page counts to absolute byte quantities using dynamic page sizing.
+    *out_free_memory_bytes = (unsigned long long)virtualMemoryStatisticsDataStructure.free_count * (unsigned long long)systemMemoryPageSizeInBytes;
+    *out_active_memory_bytes = (unsigned long long)virtualMemoryStatisticsDataStructure.active_count * (unsigned long long)systemMemoryPageSizeInBytes;
+    *out_wired_memory_bytes = (unsigned long long)virtualMemoryStatisticsDataStructure.wire_count * (unsigned long long)systemMemoryPageSizeInBytes;
+    *out_compressed_memory_bytes = (unsigned long long)virtualMemoryStatisticsDataStructure.compressor_page_count * (unsigned long long)systemMemoryPageSizeInBytes;
+
+    return 0;
+}
+*/
+import "C"
+
+func main() {
+	log.Printf("Initializing Darwin Mach Host Virtual Memory Pressure Introspection Engine...")
+
+	var freeMemoryBytes uint64
+	var activeMemoryBytes uint64
+	var wiredMemoryBytes uint64
+	var compressedMemoryBytes uint64
+
+	kernelOperationResultCode := C.fetch_darwin_host_virtual_memory_statistics(
+		(*C.ulong_long)(unsafe.Pointer(&freeMemoryBytes)),
+		(*C.ulong_long)(unsafe.Pointer(&activeMemoryBytes)),
+		(*C.ulong_long)(unsafe.Pointer(&wiredMemoryBytes)),
+		(*C.ulong_long)(unsafe.Pointer(&compressedMemoryBytes)),
+	)
+
+	if kernelOperationResultCode != 0 {
+		log.Fatalf("failed to query Mach host virtual memory statistics, kernel return code: %d", kernelOperationResultCode)
+	}
+
+	fmt.Printf("[+] Darwin Host Metric — Free Memory:        %.2f GB\n", float64(freeMemoryBytes)/(1024*1024*1024))
+	fmt.Printf("[+] Darwin Host Metric — Active Memory:      %.2f GB\n", float64(activeMemoryBytes)/(1024*1024*1024))
+	fmt.Printf("[+] Darwin Host Metric — Wired Memory:       %.2f GB\n", float64(wiredMemoryBytes)/(1024*1024*1024))
+	fmt.Printf("[+] Darwin Host Metric — Compressed Memory:  %.2f GB\n", float64(compressedMemoryBytes)/(1024*1024*1024))
+}</code></pre>
+
+                <!-- Media-adaptive Mach Host Statistics Architecture Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 14.6: Mach Host Statistics Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/mach-host-statistics-architecture-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/mach-host-statistics-architecture-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/mach-host-statistics-architecture-light.png" alt="Mach Host Statistics Architecture Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Conclusion Section -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">Conclusion</h2>
+                <p>
+                    By bridging Go directly with the Darwin XNU hybrid kernel through zero-allocation Cgo patterns and native primitives,
+                    we transcend the performance constraints of standard POSIX abstractions. Throughout this chapter, we engineered a production-grade
+                    toolkit capable of bypassing high-level runtime overhead to interface safely with low-level kernel subsystems.
+                </p>
+                <p>Key architectural takeaways include:</p>
+                <ul>
+                    <li class="mb-2"><strong>Zero-Allocation Bridging:</strong> Leveraging <code>unsafe.Pointer</code> casting and pre-allocated buffer structures to maintain sub-microsecond telemetry loops without triggering garbage collection pressure.</li>
+                    <li class="mb-2"><strong>BSD Hardware Introspection:</strong> Safely querying CPU topology and system configurations via <code>sysctlbyname</code> with robust fallback logic.</li>
+                    <li class="mb-0"><strong>Mach Task & Host Telemetry:</strong> Inspecting precise process-level footprints via <code>mach_task_self()</code> and <code>task_info</code>, alongside global hardware memory pressure distribution via <code>host_statistics64</code> and dynamic page sizing.</li>
+                </ul>
+                <p class="mt-3">
+                    Mastering these patterns empowers systems engineers, daemon authors, and hypervisor developers to build lightning-fast, highly reliable
+                    native tools tailored specifically for macOS and Apple Silicon architectures. Armed with direct kernel visibility, you are now equipped
+                    to design high-performance monitoring and infrastructure tooling that operates at the absolute edge of the operating system.
+                </p>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Copyright & Licensing Notice with alert-purple class -->
+            <div class="alert alert-caution shadow-sm rounded-3 mb-4 p-4"
+                 role="alert">
+                <h5 class="alert-heading fw-bold mb-2">
+                    <i class="bi bi-exclamation-triangle-fill me-2"></i>Copyright & Licensing Notice
+                </h5>
+                <p class="mb-2">
+                    <strong>Go Systems Blueprint Copyright © 2026 Braiden Gole. All rights reserved.</strong>
+                </p>
+                <p class="mb-2">
+                    This work is published and made available for free reading
+                    and personal educational use. However, it is protected
+                    under international copyright law.
+                </p>
+                <p class="mb-0">
+                    You may <strong>NOT</strong> sell this book, charge for
+                    access to it, bundle it into commercial products, or
+                    distribute modified/derivative versions without express
+                    written permission from the author. Any redistribution
+                    must prominently display full attribution to the
+                    author, <strong>Braiden Gole</strong>, along with a
+                    direct link to the original repository.
+                </p>
+            </div>
+
+            <hr>
+
+            <div class="mt-4 text-center">
+                <p class="mb-4"><strong>Author:</strong> <i>Braiden Gole</i></p>
+                <div class="d-flex flex-column align-items-center gap-2 text-body-secondary">
+                    <span><i class="bi bi-envelope-fill me-1 author-icon"></i>
+                        <a href="mailto:braiden.gole@gmail.com"
+                            class="text-decoration-none">braiden.gole@gmail.com</a>
+                    </span>
+                    <span><i class="bi bi-globe me-1 author-icon"></i>
+                        <a href="https://braiden-gole.github.io/"
+                            class="text-decoration-none">braiden-gole.github.io</a>
+                    </span>
+                    <span><i class="bi bi-github me-1 author-icon"></i>
+                        <a href="https://github.com/braiden-gole"
+                            class="text-decoration-none">braiden-gole</a>
+                    </span>
+                </div>
+            </div>
+
+            <hr>
+            <div class="mb-3">
+                <a href="../index.html" class="btn btn-info float-end">
+                    <i class="bi bi-arrow-left me-1"></i> Back to Blueprint
+                </a>
+            </div>
+            <br>
+        </main>
+
+        <!-- Bootstrap 5 JavaScript Bundle -->
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+                integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+                crossorigin="anonymous"></script>
+
+        <!-- Prism.js Core & Auto-Loader for Go Systems Blueprint -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+
+        <!-- Custom JavaScript -->
+        <script src="../script.js"></script>
+    </body>
+</html>

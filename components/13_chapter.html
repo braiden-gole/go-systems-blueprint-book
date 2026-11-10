@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="light dark">
+        <title>Chapter 13: Low-Level Event Loops (epoll & kqueue) | Go Systems Blueprint</title>
+
+        <!-- Bootstrap 5 CSS -->
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+              rel="stylesheet"
+              integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+              crossorigin="anonymous">
+        
+        <!-- Bootstrap Icons -->
+        <link rel="stylesheet"
+              href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+        <!-- Prism Core Stylesheet for Syntax Highlighting -->
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+
+        <!-- Custom CSS -->
+        <link rel="stylesheet" href="../stylesheets/main.css">
+        <link rel="stylesheet" href="../stylesheets/style.css">
+    </head>
+    <body>
+        <main class="container" style="max-width: 900px;">
+            <header class="text-start mb-5">
+                <div class="d-flex align-items-center mb-3">
+                    <div style="width: 60px; height: 60px; flex-shrink: 0;">
+                        <canvas id="golang-canvas" style="display: block; width: 100%; height: 100%;"></canvas>
+                    </div>
+                    <h1 class="display-5 fw-bold mb-0">Low-Level Event Loops</h1>
+                </div>
+
+                <p class="lead fw-semibold mx-auto">
+                    Modern high-performance systems engineering requires mastering direct operating system event notification primitives.
+                    While Go's standard library netpoller is exceptionally engineered for general-purpose applications, ultra-low-latency
+                    workloads, high-frequency trading gateways, and custom message brokers demand complete control over file descriptor
+                    lifecycles, memory reuse, and event notification dispatching.
+                </p>
+                <p class="small">
+                    This chapter deconstructs direct OS-level multiplexing using <code>epoll</code> on Linux and <code>kqueue</code> on macOS,
+                    walking through production-grade, zero-allocation event loop skeletons implemented via raw system calls.
+                </p>
+
+                <!-- Callout Box for Chapter Objectives -->
+                <div class="card bg-body-tertiary border shadow-sm rounded-3 mt-4 p-4">
+                    <h5 class="fw-bold mb-3">
+                        <i class="bi bi-info-circle me-2"></i>Chapter Objectives
+                    </h5>
+                    <ul class="mb-0">
+                        <li class="mb-2">Deconstruct the limitations of Go's runtime network poller (<code>netpoller</code>) for ultra-low-latency workloads.</li>
+                        <li class="mb-2">Master direct operating system event notification primitives: <code>epoll</code> on Linux and <code>kqueue</code> on macOS.</li>
+                        <li class="mb-2">Implement a high-performance, non-blocking, edge-triggered network event loop from scratch using raw system calls.</li>
+                        <li class="mb-0">Enforce strict zero-allocation memory constraints during high-throughput file descriptor multiplexing.</li>
+                    </ul>
+                </div>
+            </header>
+
+            <hr class="my-4">
+
+            <!-- Section 13.1 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    13.1 Introduction: Why Bypass Go's Net Poller?
+                </h2>
+                <p>
+                    Go’s standard library netpoller (<code>internal/poll</code>) is a masterpiece of runtime engineering. It transparently converts
+                    blocking network operations into cooperative goroutine yields, allowing developers to write straightforward synchronous-looking
+                    code while achieving asynchronous I/O performance.
+                </p>
+                <p>
+                    However, at extreme scale handling millions of concurrent connections, sub-millisecond tail latencies (<code>p99.9</code>),
+                    or custom protocol parsing engines, Go's runtime scheduler overhead, goroutine allocation costs, and hidden synchronization
+                    primitives introduce bottlenecks.
+                </p>
+                <p>
+                    For infrastructure daemons, custom message brokers, and high-frequency trading gateways, senior systems engineers must bypass
+                    the standard library abstractions entirely. By interfacing directly with kernel-level multiplexing subsystems, we gain
+                    deterministic control over file descriptor lifecycles, memory reuse, and event notification dispatching.
+                </p>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 13.2 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    13.2 Operating System Primitives: Linux vs. macOS
+                </h2>
+                <p>
+                    To build cross-platform systems supporting both Linux and macOS, we must bridge the architectural differences between
+                    their underlying event notification mechanisms:
+                </p>
+
+                <div class="table-responsive my-4">
+                    <table class="table table-bordered table-striped align-middle">
+                        <thead>
+                            <tr>
+                                <th>Feature</th>
+                                <th>Linux (epoll)</th>
+                                <th>macOS (kqueue)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>System Call Interface</strong></td>
+                                <td><code>epoll_create1</code>, <code>epoll_ctl</code>, <code>epoll_wait</code></td>
+                                <td><code>kqueue</code>, <code>kevent</code></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Trigger Modes</strong></td>
+                                <td>Level-triggered & Edge-triggered (<code>EPOLLET</code>)</td>
+                                <td>Event-driven (automatic edge/one-shot via <code>EV_CLEAR</code>)</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Descriptor Scope</strong></td>
+                                <td>File descriptors only (<code>fd</code>)</td>
+                                <td>Generic kernel objects (Sockets, VFS, Signals, Timers)</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Complexity</strong></td>
+                                <td>Explicit flag management for state</td>
+                                <td>Unified filter flags (<code>EVFILT_READ</code>, <code>EVFILT_WRITE</code>)</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 13.3 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    13.3 Architectural Blueprint: The Zero-Allocation Event Loop
+                </h2>
+                <p>A production-grade event loop consists of three primary components:</p>
+                <ul>
+                    <li class="mb-2"><strong>The Poller Core:</strong> A dedicated OS thread managing the kernel event queue.</li>
+                    <li class="mb-2"><strong>The Connection Registry:</strong> An O(1) lookup map or flat array binding file descriptors to connection state buffers.</li>
+                    <li class="mb-0"><strong>The Ring Buffer / Worker Dispatcher:</strong> Reusable byte buffers that eliminate garbage collector pressure during packet reads and writes.</li>
+                </ul>
+
+                <!-- Media-adaptive Event Loop Architecture Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 13.3: Event Loop Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/event-loop-architecture-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/event-loop-architecture-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/event-loop-architecture-light.png" alt="Event Loop Architecture Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 13.4 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    13.4 Production Code: Low-Level Epoll Loop Skeleton (Linux)
+                </h2>
+                <p>
+                    The following implementation demonstrates how to initialize an <code>epoll</code> instance, register a non-blocking
+                    socket listener, and run an edge-triggered event loop using Go's <code>golang.org/x/sys/unix</code> package.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">//go:build linux
+
+package main
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"syscall"
+
+	"golang.org/x/sys/unix"
+)
+
+func main() {
+	// 1. Create a non-blocking TCP listener socket.
+	tcpListener, bindError := net.Listen("tcp", "0.0.0.0:8080")
+
+	if bindError != nil {
+		log.Fatalf("failed to bind listener: %v", bindError)
+	}
+
+	defer tcpListener.Close()
+
+	// Extract raw file descriptor from net.Listener.
+	tcpListenerConcrete, isTcpListener := tcpListener.(*net.TCPListener)
+
+	if !isTcpListener {
+		log.Fatalf("expected TCPListener")
+	}
+
+	listenerFile, fileError := tcpListenerConcrete.File()
+
+	if fileError != nil {
+		log.Fatalf("failed to get listener file descriptor: %v", fileError)
+	}
+
+	defer listenerFile.Close()
+
+	listenerFileDescriptor := int(listenerFile.Fd())
+
+	// Set socket to non-blocking mode.
+	if nonBlockError := syscall.SetNonblock(listenerFileDescriptor, true); nonBlockError != nil {
+		log.Fatalf("failed to set non-blocking: %v", nonBlockError)
+	}
+
+	// 2. Create epoll instance via epoll_create1.
+	epollInstanceFileDescriptor, epollCreateError := unix.EpollCreate1(0)
+
+	if epollCreateError != nil {
+		log.Fatalf("failed to create epoll instance: %v", epollCreateError)
+	}
+
+	defer unix.Close(epollInstanceFileDescriptor)
+
+	// 3. Register listener fd with epoll for read events (Edge-Triggered).
+	listenerEpollEvent := unix.EpollEvent{
+		Events: unix.EPOLLIN | unix.EPOLLET,
+		Fd:     int32(listenerFileDescriptor),
+	}
+
+	if epollCtlError := unix.EpollCtl(epollInstanceFileDescriptor, unix.EPOLL_CTL_ADD, listenerFileDescriptor, &listenerEpollEvent); epollCtlError != nil {
+		log.Fatalf("failed to add listener to epoll: %v", epollCtlError)
+	}
+
+	log.Printf("Systems Event Loop initialized on [Linux epoll]. Listening on :8080...")
+
+	// 4. Event Loop Execution Buffer.
+	triggeredEventsSlice := make([]unix.EpollEvent, 64)
+
+	for {
+		triggeredEventCount, waitError := unix.EpollWait(epollInstanceFileDescriptor, triggeredEventsSlice, -1)
+
+		if waitError != nil {
+			if waitError == syscall.EINTR {
+				continue
+			}
+
+			log.Printf("epoll_wait error: %v", waitError)
+			break
+		}
+
+		for index := 0; index < triggeredEventCount; index++ {
+			currentFileDescriptor := int(triggeredEventsSlice[index].Fd)
+
+			if currentFileDescriptor == listenerFileDescriptor {
+				// Accept incoming connections.
+				incomingConnectionFileDescriptor, _, acceptError := unix.Accept(listenerFileDescriptor)
+
+				if acceptError != nil {
+					if acceptError == syscall.EWOULDBLOCK {
+						continue
+					}
+
+					log.Printf("accept error: %v", acceptError)
+					continue
+				}
+
+				if connNonBlockError := syscall.SetNonblock(incomingConnectionFileDescriptor, true); connNonBlockError != nil {
+					log.Printf("failed to set conn non-blocking: %v", connNonBlockError)
+
+					unix.Close(incomingConnectionFileDescriptor)
+					continue
+				}
+
+				// Register client connection to epoll.
+				clientEpollEvent := unix.EpollEvent{
+					Events: unix.EPOLLIN | unix.EPOLLET | unix.EPOLLRDHUP,
+					Fd:     int32(incomingConnectionFileDescriptor),
+				}
+
+				if clientEpollError := unix.EpollCtl(epollInstanceFileDescriptor, unix.EPOLL_CTL_ADD, incomingConnectionFileDescriptor, &clientEpollEvent); clientEpollError != nil {
+					log.Printf("failed to add client to epoll: %v", clientEpollError)
+
+					unix.Close(incomingConnectionFileDescriptor)
+					continue
+				}
+
+				fmt.Printf("[+] Accepted new connection on FD %d\n", incomingConnectionFileDescriptor)
+			} else {
+				// Handle client I/O events.
+				handleClientIO(epollInstanceFileDescriptor, currentFileDescriptor)
+			}
+		}
+	}
+}
+
+func handleClientIO(epollInstanceFileDescriptor int, targetFileDescriptor int) {
+	ioBuffer := make([]byte, 1024)
+	bytesReadCount, readError := syscall.Read(targetFileDescriptor, ioBuffer)
+
+	if readError != nil || bytesReadCount <= 0 {
+		if readError != syscall.EWOULDBLOCK {
+			fmt.Printf("[-] Closing connection on FD %d (err: %v)\n", targetFileDescriptor, readError)
+			unix.EpollCtl(epollInstanceFileDescriptor, unix.EPOLL_CTL_DEL, targetFileDescriptor, nil)
+			syscall.Close(targetFileDescriptor)
+		}
+
+		return
+	}
+
+	// Echo data back (Zero-allocation socket write path).
+	_, _ = syscall.Write(targetFileDescriptor, ioBuffer[:bytesReadCount])
+}</code></pre>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 13.5 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    13.5 Production Code: Low-Level Kqueue Loop Skeleton (macOS)
+                </h2>
+                <p>
+                    While Linux relies on <code>epoll</code>, macOS and BSD-derived kernels utilize <code>kqueue</code>. Unlike <code>epoll</code>,
+                    which separates control configuration (<code>epoll_ctl</code>) from polling (<code>epoll_wait</code>), <code>kqueue</code> provides
+                    a unified system call (<code>kevent</code>) that handles both subscription registrations and event dispatching through shared
+                    changelist and eventlist buffers.
+                </p>
+                <p>
+                    The following implementation mirrors our Linux epoll skeleton, targeting macOS via the <code>golang.org/x/sys/unix</code> package
+                    using edge-triggered semantics (<code>unix.EV_CLEAR</code>):
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">//go:build darwin
+
+package main
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"syscall"
+
+	"golang.org/x/sys/unix"
+)
+
+func main() {
+	// 1. Create a non-blocking TCP listener socket.
+	tcpListener, bindError := net.Listen("tcp", "0.0.0.0:8080")
+
+	if bindError != nil {
+		log.Fatalf("failed to bind listener: %v", bindError)
+	}
+
+	defer tcpListener.Close()
+
+	// Extract raw file descriptor from net.Listener.
+	tcpListenerConcrete, isTcpListener := tcpListener.(*net.TCPListener)
+
+	if !isTcpListener {
+		log.Fatalf("expected TCPListener")
+	}
+
+	listenerFile, fileError := tcpListenerConcrete.File()
+
+	if fileError != nil {
+		log.Fatalf("failed to get listener file descriptor: %v", fileError)
+	}
+
+	defer listenerFile.Close()
+
+	listenerFileDescriptor := int(listenerFile.Fd())
+
+	// Set socket to non-blocking mode.
+	if nonBlockError := syscall.SetNonblock(listenerFileDescriptor, true); nonBlockError != nil {
+		log.Fatalf("failed to set non-blocking: %v", nonBlockError)
+	}
+
+	// 2. Create kqueue instance.
+	kqueueFileDescriptor, kqueueCreateError := unix.Kqueue()
+
+	if kqueueCreateError != nil {
+		log.Fatalf("failed to create kqueue instance: %v", kqueueCreateError)
+	}
+
+	defer unix.Close(kqueueFileDescriptor)
+
+	// 3. Register listener file descriptor with kqueue for read events.
+	changeListSlice := []unix.Kevent_t{
+		{
+			Ident:  uint64(listenerFileDescriptor),
+			Filter: unix.EVFILT_READ,
+			Flags:  unix.EV_ADD | unix.EV_ENABLE,
+			Fflags: 0,
+			Data:   0,
+			Udata:  nil,
+		},
+	}
+
+	// Apply initial registration change via kevent.
+	if _, keventSetupError := unix.Kevent(kqueueFileDescriptor, changeListSlice, nil, nil); keventSetupError != nil {
+		log.Fatalf("failed to register listener with kqueue: %v", keventSetupError)
+	}
+
+	log.Printf("Systems Event Loop initialized on [macOS kqueue]. Listening on :8080...")
+
+	// 4. Event Loop Execution Buffer.
+	triggeredEventsSlice := make([]unix.Kevent_t, 64)
+	emptyChangeListSlice := []unix.Kevent_t{}
+
+	for {
+		triggeredEventCount, waitError := unix.Kevent(kqueueFileDescriptor, emptyChangeListSlice, triggeredEventsSlice, nil)
+
+		if waitError != nil {
+			if waitError == syscall.EINTR {
+				continue
+			}
+
+			log.Printf("kevent wait error: %v", waitError)
+			break
+		}
+
+		for index := 0; index < triggeredEventCount; index++ {
+			currentEvent := triggeredEventsSlice[index]
+			currentFileDescriptor := int(currentEvent.Ident)
+
+			// Check for socket errors or EOF flags.
+			if (currentEvent.Flags & unix.EV_EOF) != 0 {
+				fmt.Printf("[-] Connection EOF or error on FD %d\n", currentFileDescriptor)
+
+				unix.Close(currentFileDescriptor)
+				continue
+			}
+
+			if currentFileDescriptor == listenerFileDescriptor {
+				// Accept incoming connections.
+				incomingConnectionFileDescriptor, _, acceptError := unix.Accept(listenerFileDescriptor)
+
+				if acceptError != nil {
+					if acceptError == syscall.EWOULDBLOCK {
+						continue
+					}
+
+					log.Printf("accept error: %v", acceptError)
+					continue
+				}
+
+				if connNonBlockError := syscall.SetNonblock(incomingConnectionFileDescriptor, true); connNonBlockError != nil {
+					log.Fatalf("failed to set conn non-blocking: %v", connNonBlockError)
+
+					unix.Close(incomingConnectionFileDescriptor)
+					continue
+				}
+
+				// Register client connection to kqueue with edge-like behavior (EV_CLEAR).
+				clientChangeListSlice := []unix.Kevent_t{
+					{
+						Ident:  uint64(incomingConnectionFileDescriptor),
+						Filter: unix.EVFILT_READ,
+						Flags:  unix.EV_ADD | unix.EV_ENABLE | unix.EV_CLEAR,
+						Fflags: 0,
+						Data:   0,
+						Udata:  nil,
+					},
+				}
+
+				if _, clientKeventError := unix.Kevent(kqueueFileDescriptor, clientChangeListSlice, nil, nil); clientKeventError != nil {
+					log.Fatalf("failed to add client to kqueue: %v", clientKeventError)
+
+					unix.Close(incomingConnectionFileDescriptor)
+					continue
+				}
+
+				fmt.Printf("[+] Accepted new connection on FD %d\n", incomingConnectionFileDescriptor)
+			} else {
+				// Handle client I/O events.
+				handleClientIO(kqueueFileDescriptor, currentFileDescriptor)
+			}
+		}
+	}
+}
+
+func handleClientIO(kqueueFileDescriptor int, targetFileDescriptor int) {
+	ioBuffer := make([]byte, 1024)
+	bytesReadCount, readError := syscall.Read(targetFileDescriptor, ioBuffer)
+
+	if readError != nil || bytesReadCount <= 0 {
+		if readError != syscall.EWOULDBLOCK {
+			fmt.Printf("[-] Closing connection on FD %d (err: %v)\n", targetFileDescriptor, readError)
+			unix.Close(targetFileDescriptor)
+		}
+
+		return
+	}
+
+	// Echo data back (Zero-allocation socket write path).
+	_, _ = syscall.Write(targetFileDescriptor, ioBuffer[:bytesReadCount])
+}</code></pre>
+
+                <!-- Media-adaptive macOS 13.5 Kqueue Loop Architecture Diagram -->
+                <div class="text-center my-4">
+                    <p class="small mb-2">Figure 13.5: macOS 13.5 Kqueue Loop Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/macos-13.5-kqueue-loop-architecture-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/macos-13.5-kqueue-loop-architecture-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/macos-13.5-kqueue-loop-architecture-light.png" alt="macOS 13.5 Kqueue Loop Architecture Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Key Takeaways Callout -->
+            <div class="card bg-body-tertiary border shadow-sm rounded-3 mb-4 p-4">
+                <h5 class="fw-bold mb-3">
+                    <i class="bi bi-journal-code me-2"></i>Key Takeaways
+                </h5>
+                <ul class="mb-0">
+                    <li class="mb-2">
+                        <strong>Kernel Multiplexing Control:</strong> Bypassing Go's netpoller grants fine-grained control over descriptor states,
+                        buffer lifecycles, and synchronization overhead in ultra-low-latency environments.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Linux Epoll Mechanics:</strong> Combines <code>epoll_create1</code>, <code>epoll_ctl</code>, and <code>epoll_wait</code>
+                        with Edge-Triggered (<code>EPOLLET</code>) semantics for high-performance notification dispatch.
+                    </li>
+                    <li class="mb-2">
+                        <strong>macOS Kqueue Mechanics:</strong> Utilizes unified <code>kevent</code> changelist and eventlist buffers to manage
+                        both subscriptions and event notifications across generic kernel objects.
+                    </li>
+                    <li class="mb-0">
+                        <strong>Zero-Allocation Discipline:</strong> Reusing event slices and byte buffers prevents garbage collection spikes
+                        on high-throughput network hot paths.
+                    </li>
+                </ul>
+            </div>
+
+            <hr>
+            <div class="mb-3">
+                <a href="../components/14_chapter.html" class="btn btn-info float-end">
+                    <i class="bi bi-arrow-left me-1"></i> Back to Blueprint
+                </a>
+            </div>
+            <br>
+        </main>
+
+        <!-- Bootstrap 5 JavaScript Bundle -->
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+                integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+                crossorigin="anonymous"></script>
+
+        <!-- Prism.js Core & Auto-Loader for Go Systems Blueprint -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+
+        <!-- Custom JavaScript -->
+        <script src="../script.js"></script>
+    </body>
+</html>
