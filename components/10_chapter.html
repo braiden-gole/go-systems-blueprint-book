@@ -1,0 +1,1282 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="light dark">
+        <meta name="description" content="A comprehensive guide and blueprint for building high-performance, scalable systems in Go by Braiden Gole." />
+        <meta name="author" content="Braiden Gole" />
+        <meta name="robots" content="index, follow" />
+
+        <!-- Open Graph Social Preview Tags -->
+        <meta property="og:title" content="Go Systems Blueprint | Braiden Gole" />
+        <meta property="og:description" content="A comprehensive guide and blueprint for building high-performance, scalable systems in Go by Braiden Gole." />
+        <meta property="og:type" content="website" />
+        <meta property="og:url" content="https://braiden-gole.github.io/go-systems-blueprint-book/" />
+        <meta property="og:image" content="images/circle.png?v=2" />
+        <meta property="og:image:width" content="180" />
+        <meta property="og:image:height" content="180" />
+        
+        <title>Chapter 10: Testing, Quality & Fuzzing | Go Systems Blueprint</title>
+
+        <!-- Primary Browser Tab Favicons (Circle Variant) -->
+        <link rel="icon" type="image/x-icon" href="../images/circle.ico?v=20">
+        <link rel="icon" type="image/png" sizes="32x32" href="../images/circle.png?v=20">
+        <link rel="icon" type="image/png" sizes="16x16" href="../images/circle.png?v=20">
+
+        <!-- Apple & General Shortcut Icon Declarations (Square Variant) -->
+        <link rel="apple-touch-icon" sizes="180x180" href="../images/square.png?v=20">
+
+        <!-- Bootstrap 5 CSS -->
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+              rel="stylesheet"
+              integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+              crossorigin="anonymous">
+        
+        <!-- Bootstrap Icons -->
+        <link rel="stylesheet"
+              href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+        <!-- Adaptive GitHub Theme for Prism.js (Switches automatically via media query) -->
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prism-theme-github/themes/prism-theme-github-light.css" media="(prefers-color-scheme: light)">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prism-theme-github/themes/prism-theme-github-dark.css" media="(prefers-color-scheme: dark)">
+
+        <!-- Custom CSS -->
+        <link rel="stylesheet" href="../stylesheets/main.css">
+        <link rel="stylesheet" href="../stylesheets/style.css">
+    </head>
+    <body>
+        <main class="container" style="max-width: 900px;">
+            <header class="text-start mb-5">
+                <div class="d-flex align-items-center mb-3">
+                    <div style="width: 60px; height: 60px; flex-shrink: 0;">
+                        <canvas id="golang-canvas" style="display: block; width: 100%; height: 100%;"></canvas>
+                    </div>
+                    <h1 class="display-5 fw-bold mb-0">Testing, Quality & Fuzzing</h1>
+                </div>
+
+                <p class="lead fw-semibold mx-auto">
+                    Welcome to Chapter 10 of the <strong>Go Systems Blueprint</strong>.
+                    Building upon the persistence and profiling patterns examined in Chapter 9,
+                    rigorous verification validates concurrent correctness, zero-allocation hot paths, and resilience against malformed inputs.
+                </p>
+
+                <p class="small">
+                    This chapter covers concurrent test suites under <code>-race</code>, allocation-budgeted benchmarks via <code>testing.B</code>,
+                    and native fuzzing via <code>testing.F</code> across a complete Golomb-Coded Set (GCS) implementation.
+                </p>
+            </header>
+
+            <hr class="my-4">
+
+            <!-- Section 10.1 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    10.1 Table-Driven Testing & Race-Condition Validation
+                </h2>
+                <p>
+                    Systems code must be verified across disjoint and boundary cases and executed under Go's race detector
+                    (<code>go test -race</code>) to catch unsynchronized memory accesses and out-of-bounds failures early.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+// storeScenario defines a table-driven test case for MappedStore bounds, partitioning, and concurrency.
+type storeScenario struct {
+	scenarioName        string
+	storeByteSize       int64
+	workerCount         int
+	recordsPerWorker    int64
+	probeSlotIndex      int64
+	expectInitError     bool
+	expectWriteError    bool
+	expectReadError     bool
+	verifyAllSlotsAfter bool
+}
+
+// TestMappedStoreTableDrivenAndRace validates table-driven boundary cases and partitioned concurrent writes under -race.
+func TestMappedStoreTableDrivenAndRace(test *testing.T) {
+	// Defensively guard against a nil testing.T runner reference.
+	if test == nil {
+		return
+	}
+
+	tempWorkspaceDir := test.TempDir()
+
+	const baseEpochSeconds int64 = 1718712300
+
+	scenarios := []storeScenario{
+		{
+			scenarioName:        "PartitionedConcurrentWritesAndFullReadback",
+			storeByteSize:       1024 * 1024,
+			workerCount:         4,
+			recordsPerWorker:    1000,
+			probeSlotIndex:      0,
+			expectInitError:     false,
+			expectWriteError:    false,
+			expectReadError:     false,
+			verifyAllSlotsAfter: true,
+		},
+		{
+			scenarioName:        "OutOfBoundsSlotWriteRejected",
+			storeByteSize:       int64(logRecordByteSize) * 4,
+			workerCount:         1,
+			recordsPerWorker:    1,
+			probeSlotIndex:      4,
+			expectInitError:     false,
+			expectWriteError:    true,
+			expectReadError:     true,
+			verifyAllSlotsAfter: false,
+		},
+		{
+			scenarioName:        "NegativeSlotIndexRejected",
+			storeByteSize:       int64(logRecordByteSize) * 4,
+			workerCount:         1,
+			recordsPerWorker:    1,
+			probeSlotIndex:      -1,
+			expectInitError:     false,
+			expectWriteError:    true,
+			expectReadError:     true,
+			verifyAllSlotsAfter: false,
+		},
+		{
+			scenarioName:        "ZeroStoreSizeRejectedDuringInit",
+			storeByteSize:       0,
+			workerCount:         1,
+			recordsPerWorker:    1,
+			probeSlotIndex:      0,
+			expectInitError:     true,
+			expectWriteError:    false,
+			expectReadError:     false,
+			verifyAllSlotsAfter: false,
+		},
+	}
+
+	for scenarioIdx, activeScenario := range scenarios {
+		scenarioCase := activeScenario
+		subtestTitle := scenarioCase.scenarioName
+
+		if subtestTitle == "" {
+			subtestTitle = "Scenario"
+		}
+
+		test.Run(subtestTitle, func(subtest *testing.T) {
+			// Defensively guard against a nil subtest runner reference.
+			if subtest == nil {
+				return
+			}
+
+			backingStorePath := filepath.Join(
+				tempWorkspaceDir,
+				"mapped_store_case_"+string(rune('0'+byte(scenarioIdx%10)))+".db",
+			)
+
+			mappedStore, initError := NewMappedStore(backingStorePath, scenarioCase.storeByteSize)
+
+			if scenarioCase.expectInitError {
+				if initError == nil {
+					if mappedStore != nil {
+						_ = mappedStore.Close()
+					}
+					subtest.Fatalf("expected initialization error for store size %d, got nil\n", scenarioCase.storeByteSize)
+				}
+
+				return
+			}
+
+			if initError != nil {
+				subtest.Fatalf("unexpected MappedStore initialization error: %v\n", initError)
+			}
+
+			defer func() {
+				if closeError := mappedStore.Close(); closeError != nil {
+					subtest.Errorf("failed to close MappedStore cleanly: %v\n", closeError)
+				}
+
+				_ = os.Remove(backingStorePath)
+			}()
+
+			// Probe explicit boundary or out-of-range slot indices before launching concurrent workers.
+			if scenarioCase.expectWriteError {
+				boundaryEntry := LogRecord{
+					RecordID:  42,
+					Timestamp: baseEpochSeconds,
+					Flags:     1,
+				}
+
+				writeErr := mappedStore.WriteRecord(scenarioCase.probeSlotIndex, boundaryEntry)
+
+				if writeErr == nil {
+					subtest.Errorf("expected write error for slot %d, got nil\n", scenarioCase.probeSlotIndex)
+				}
+
+				_, readErr := mappedStore.ReadRecord(scenarioCase.probeSlotIndex)
+
+				if scenarioCase.expectReadError && readErr == nil {
+					subtest.Errorf("expected read error for slot %d, got nil\n", scenarioCase.probeSlotIndex)
+				}
+
+				return
+			}
+
+			var workerGroup sync.WaitGroup
+
+			writeFailureChannel := make(chan error, scenarioCase.workerCount)
+
+			// Partition disjoint slot ranges across goroutines so concurrent writes never collide on a slot.
+			for workerOrdinal := 0; workerOrdinal < scenarioCase.workerCount; workerOrdinal++ {
+				workerGroup.Add(1)
+
+				partitionStartSlot := int64(workerOrdinal) * scenarioCase.recordsPerWorker
+
+				go func(assignedStartSlot int64) {
+					defer workerGroup.Done()
+
+					for slotOffset := int64(0); slotOffset < scenarioCase.recordsPerWorker; slotOffset++ {
+						currentSlot := assignedStartSlot + slotOffset
+						recordPayload := LogRecord{
+							RecordID:  uint64(currentSlot),
+							Timestamp: baseEpochSeconds + currentSlot,
+							Flags:     1,
+						}
+
+						if writeErr := mappedStore.WriteRecord(currentSlot, recordPayload); writeErr != nil {
+							select {
+							case writeFailureChannel <- writeErr:
+							default:
+							}
+							return
+						}
+					}
+				}(partitionStartSlot)
+			}
+
+			workerGroup.Wait()
+
+			close(writeFailureChannel)
+
+			for workerWriteErr := range writeFailureChannel {
+				if workerWriteErr != nil {
+					subtest.Fatalf("concurrent worker write error: %v\n", workerWriteErr)
+				}
+			}
+
+			if !scenarioCase.verifyAllSlotsAfter {
+				return
+			}
+
+			totalWrittenSlots := int64(scenarioCase.workerCount) * scenarioCase.recordsPerWorker
+
+			for slotCursor := int64(0); slotCursor < totalWrittenSlots; slotCursor++ {
+				storedRecord, readErr := mappedStore.ReadRecord(slotCursor)
+
+				if readErr != nil {
+					subtest.Fatalf("failed reading back record at slot %d: %v\n", slotCursor, readErr)
+				}
+
+				if storedRecord == nil {
+					subtest.Fatalf("read back nil record pointer at slot %d\n", slotCursor)
+				}
+
+				expectedRecordId := uint64(slotCursor)
+
+				if storedRecord.RecordID != expectedRecordId {
+					subtest.Errorf("slot %d RecordID mismatch: got %d, want %d\n", slotCursor, storedRecord.RecordID, expectedRecordId)
+				}
+
+				expectedTimestamp := baseEpochSeconds + slotCursor
+
+				if storedRecord.Timestamp != expectedTimestamp {
+					subtest.Errorf("slot %d Timestamp mismatch: got %d, want %d\n", slotCursor, storedRecord.Timestamp, expectedTimestamp)
+				}
+			}
+		})
+	}
+}</code></pre>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 10.2 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    10.2 High-Performance Benchmarking (<code>testing.B</code>) & Allocation Profiling
+                </h2>
+                <p>
+                    Hot-path storage and network routines should be measured with <code>testing.B</code> and <code>ReportAllocs()</code>
+                    to enforce zero heap allocations per operation (<code>allocs/op = 0</code>) and detect throughput regressions.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+)
+
+// BenchmarkMappedStoreWriteAndRead measures zero-copy write and read throughput with heap allocation reporting.
+func BenchmarkMappedStoreWriteAndRead(bench *testing.B) {
+	// Defensively guard against a nil benchmark runner reference.
+	if bench == nil {
+		return
+	}
+
+	tempDirectory := bench.TempDir()
+	benchmarkStorePath := filepath.Join(tempDirectory, "blueprint_write_read_bench.db")
+
+	const benchmarkStoreCapacity int64 = 16 * 1024 * 1024
+
+	mappedStore, storeInitError := NewMappedStore(benchmarkStorePath, benchmarkStoreCapacity)
+
+	if storeInitError != nil {
+		bench.Fatalf("failed to initialize MappedStore for benchmark: %v\n", storeInitError)
+	}
+
+	defer func() {
+		if closeError := mappedStore.Close(); closeError != nil {
+			bench.Errorf("failed to close benchmark MappedStore: %v\n", closeError)
+		}
+	}()
+
+	maxSupportedSlots := benchmarkStoreCapacity / logRecordByteSize
+
+	if maxSupportedSlots <= 0 {
+		bench.Fatalf("mapped store capacity %d is too small for record size %d\n", benchmarkStoreCapacity, logRecordByteSize)
+	}
+
+	const cyclicSlotCount int64 = 100000
+
+	activeSlotWindow := cyclicSlotCount
+
+	if activeSlotWindow > maxSupportedSlots {
+		activeSlotWindow = maxSupportedSlots
+	}
+
+	templateRecord := LogRecord{
+		RecordID:  999,
+		Timestamp: 1718712300,
+		Flags:     1,
+	}
+
+	bench.Run("SequentialZeroCopyWrite", func(subBench *testing.B) {
+		// Defensively guard against a nil sub-benchmark runner reference.
+		if subBench == nil {
+			return
+		}
+
+		subBench.ReportAllocs()
+		subBench.ResetTimer()
+
+		for stepIndex := 0; stepIndex < subBench.N; stepIndex++ {
+			targetSlot := int64(stepIndex) % activeSlotWindow
+			recordEntry := templateRecord
+			recordEntry.RecordID = uint64(targetSlot)
+
+			if writeError := mappedStore.WriteRecord(targetSlot, recordEntry); writeError != nil {
+				subBench.Fatalf("write benchmark failed at slot %d: %v\n", targetSlot, writeError)
+			}
+		}
+
+		subBench.StopTimer()
+
+		// Enforce the zero-allocation invariant on the hot write loop.
+		if subBench.N > 0 && subBench.AllocsPerOp() > 0 {
+			subBench.Errorf("expected zero heap allocations per write op, got %d allocs/op\n", subBench.AllocsPerOp())
+		}
+	})
+
+	bench.Run("SequentialZeroCopyRead", func(subBench *testing.B) {
+		// Defensively guard against a nil sub-benchmark runner reference.
+		if subBench == nil {
+			return
+		}
+
+		// Populate the active slot window before measuring read throughput.
+		for seedSlot := int64(0); seedSlot < activeSlotWindow; seedSlot++ {
+			seedEntry := LogRecord{
+				RecordID:  uint64(seedSlot),
+				Timestamp: 1718712300 + seedSlot,
+				Flags:     1,
+			}
+
+			if seedError := mappedStore.WriteRecord(seedSlot, seedEntry); seedError != nil {
+				subBench.Fatalf("failed seeding slot %d before read benchmark: %v\n", seedSlot, seedError)
+			}
+		}
+
+		var observedRecordSum uint64
+
+		subBench.ReportAllocs()
+		subBench.ResetTimer()
+
+		for stepIndex := 0; stepIndex < subBench.N; stepIndex++ {
+			targetSlot := int64(stepIndex) % activeSlotWindow
+			loadedRecord, readError := mappedStore.ReadRecord(targetSlot)
+
+			if readError != nil {
+				subBench.Fatalf("read benchmark failed at slot %d: %v\n", targetSlot, readError)
+			}
+
+			if loadedRecord == nil {
+				subBench.Fatalf("read benchmark returned nil record at slot %d\n", targetSlot)
+			}
+
+			observedRecordSum += loadedRecord.RecordID
+		}
+
+		subBench.StopTimer()
+
+		// Prevent dead-code elimination of the read value and verify zero allocations.
+		if observedRecordSum == 0 && subBench.N > 0 {
+			subBench.Logf("observed zero record sum across %d iterations\n", subBench.N)
+		}
+
+		if subBench.N > 0 && subBench.AllocsPerOp() > 0 {
+			subBench.Errorf("expected zero heap allocations per read op, got %d allocs/op\n", subBench.AllocsPerOp())
+		}
+	})
+
+	bench.Run("ParallelPartitionedWrite", func(subBench *testing.B) {
+		// Defensively guard against a nil sub-benchmark runner reference.
+		if subBench == nil {
+			return
+		}
+
+		var atomicSequenceCounter atomic.Int64
+
+		subBench.ReportAllocs()
+		subBench.ResetTimer()
+
+		subBench.RunParallel(func(workerState *testing.PB) {
+			// Defensively guard against a nil parallel worker state pointer.
+			if workerState == nil {
+				return
+			}
+
+			for workerState.Next() {
+				sequenceNumber := atomicSequenceCounter.Add(1) - 1
+				targetSlot := sequenceNumber % activeSlotWindow
+
+				workerEntry := LogRecord{
+					RecordID:  uint64(sequenceNumber),
+					Timestamp: 1718712300 + sequenceNumber,
+					Flags:     1,
+				}
+
+				if writeError := mappedStore.WriteRecord(targetSlot, workerEntry); writeError != nil {
+					subBench.Errorf("parallel write failed at slot %d: %v\n", targetSlot, writeError)
+					return
+				}
+			}
+		})
+
+		subBench.StopTimer()
+
+		if subBench.N > 0 && subBench.AllocsPerOp() > 0 {
+			subBench.Errorf("expected zero heap allocations per parallel write op, got %d allocs/op\n", subBench.AllocsPerOp())
+		}
+	})
+}</code></pre>
+
+                <div class="mt-4">
+                    <h4 class="fw-bold mb-3">Use Unit Testing (<code>testing.T</code>) when:</h4>
+                    <ul class="mb-4">
+                        <li class="mb-2"><strong>Verifying Correctness:</strong> You need to confirm exact behavior across valid inputs, boundary values, and invalid arguments.</li>
+                        <li class="mb-2"><strong>Catching Data Races:</strong> You are validating concurrent goroutines or shared memory regions under <code>go test -race</code>.</li>
+                        <li class="mb-2"><strong>Testing Error Paths:</strong> You need to verify deterministic error returns and rollback behavior on failure.</li>
+                        <li class="mb-0"><strong>Preventing Regressions:</strong> You are refactoring internal implementations while preserving public invariants.</li>
+                    </ul>
+
+                    <h4 class="fw-bold mb-3">Use Benchmarking (<code>testing.B</code>) when:</h4>
+                    <ul class="mb-0">
+                        <li class="mb-2"><strong>Measuring Throughput & Latency:</strong> You are tuning hot-path operations such as zero-copy writes or binary decoding.</li>
+                        <li class="mb-2"><strong>Enforcing Allocation Budgets:</strong> You want <code>b.ReportAllocs()</code> to verify zero heap allocations (<code>allocs/op = 0</code>).</li>
+                        <li class="mb-2"><strong>Comparing Design Trade-Offs:</strong> You need empirical numbers comparing encoding, locking, or buffer strategies.</li>
+                        <li class="mb-0"><strong>Guarding Against Regressions:</strong> You want repeatable baseline metrics across commits and Go runtime upgrades.</li>
+                    </ul>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 10.3 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    10.3 Go Golomb Coded Set Implementation, Unit Testing & Native Fuzzing
+                </h2>
+                <p>
+                    The <code>golombcodedset</code> package demonstrates deterministic binary serialization, bit-level stream parsing,
+                    unit testing, and native fuzzing (<code>testing.F</code>) against malformed or adversarial byte inputs.
+                </p>
+
+                <h4 class="fw-bold mt-4">golombcodedset &gt; arithmetic.go</h4>
+                <pre class="rounded-3"><code class="language-go">// Package golombcodedset provides a space-efficient probabilistic set using Golomb-Rice coding.
+package golombcodedset
+
+// multiplyUint64 multiplies two 64-bit unsigned integers and returns the full 128-bit product as (high, low).
+func multiplyUint64(multiplicand uint64, multiplier uint64) (uint64, uint64) {
+	const lower32Mask uint64 = 0xFFFFFFFF
+
+	// Split operands into 32-bit halves to compute the 128-bit product portably.
+	multiplicandLow := multiplicand & lower32Mask
+	multiplicandHigh := multiplicand >> 32
+	multiplierLow := multiplier & lower32Mask
+	multiplierHigh := multiplier >> 32
+
+	partialLowLow := multiplicandLow * multiplierLow
+	crossLowHigh := multiplicandLow * multiplierHigh
+	crossHighLow := multiplicandHigh * multiplierLow
+	partialHighHigh := multiplicandHigh * multiplierHigh
+
+	carryAccumulator := (partialLowLow >> 32) +
+		(crossLowHigh & lower32Mask) +
+		(crossHighLow & lower32Mask)
+
+	lower64Bits := (partialLowLow & lower32Mask) | (carryAccumulator << 32)
+	upper64Bits := partialHighHigh +
+		(crossLowHigh >> 32) +
+		(crossHighLow >> 32) +
+		(carryAccumulator >> 32)
+
+	return upper64Bits, lower64Bits
+}
+
+// fastRangeReduction maps a uniformly distributed 64-bit hash into [0, rangeLimit) without modulo bias.
+func fastRangeReduction(hashValue uint64, rangeLimit uint64) uint64 {
+	// Defensively return zero for a degenerate zero range limit.
+	if rangeLimit == 0 {
+		return 0
+	}
+
+	upper64Bits, _ := multiplyUint64(hashValue, rangeLimit)
+
+	return upper64Bits
+}</code></pre>
+
+                <h4 class="fw-bold mt-4">golombcodedset &gt; bit_stream_reader.go</h4>
+                <pre class="rounded-3"><code class="language-go">package golombcodedset
+
+// bitStreamReader decodes least-significant-bit-first values with explicit bounds checks.
+type bitStreamReader struct {
+	buffer      []byte
+	byteIndex   int
+	currentByte uint8
+	bitOffset   uint8
+}
+
+// newBitStreamReader constructs a bit stream reader initialized to load the first byte on demand.
+func newBitStreamReader(encodedBits []byte) *bitStreamReader {
+	// Setting bitOffset to 8 forces the initial readSingleBit call to pull byte zero.
+	return &bitStreamReader{
+		buffer:    encodedBits,
+		bitOffset: 8,
+	}
+}
+
+// hasRemainingBits reports whether unread bits remain in the underlying buffer.
+func (streamReader *bitStreamReader) hasRemainingBits() bool {
+	if streamReader == nil {
+		return false
+	}
+
+	if streamReader.byteIndex < len(streamReader.buffer) {
+		return true
+	}
+
+	return streamReader.byteIndex == len(streamReader.buffer) && streamReader.bitOffset < 8
+}
+
+// remainingBits returns the exact count of unread bits left in the bitstream.
+func (streamReader *bitStreamReader) remainingBits() uint64 {
+	if streamReader == nil {
+		return 0
+	}
+
+	totalBits := uint64(len(streamReader.buffer)) * 8
+	consumedBits := uint64(streamReader.byteIndex) * 8
+
+	if streamReader.bitOffset < 8 && streamReader.byteIndex > 0 {
+		consumedBits += uint64(streamReader.bitOffset)
+	}
+
+	if consumedBits >= totalBits {
+		return 0
+	}
+
+	return totalBits - consumedBits
+}
+
+// readSingleBit reads the next least-significant bit and reports whether a bit was available.
+func (streamReader *bitStreamReader) readSingleBit() (uint8, bool) {
+	if streamReader == nil {
+		return 0, false
+	}
+
+	if streamReader.bitOffset == 8 {
+		if streamReader.byteIndex >= len(streamReader.buffer) {
+			return 0, false
+		}
+
+		streamReader.currentByte = streamReader.buffer[streamReader.byteIndex]
+		streamReader.byteIndex++
+		streamReader.bitOffset = 0
+	}
+
+	extractedBit := (streamReader.currentByte >> streamReader.bitOffset) & 1
+	streamReader.bitOffset++
+
+	return extractedBit, true
+}
+
+// readLeastSignificantBits reads up to 63 bits in LSB-first order into a uint64.
+func (streamReader *bitStreamReader) readLeastSignificantBits(bitCount uint8) (uint64, bool) {
+	// Defensively reject bit counts that would overflow uint64 assembly.
+	if bitCount > 63 {
+		return 0, false
+	}
+
+	var assembledValue uint64
+
+	for bitPosition := uint8(0); bitPosition < bitCount; bitPosition++ {
+		bitValue, ok := streamReader.readSingleBit()
+
+		if !ok {
+			return 0, false
+		}
+
+		assembledValue |= uint64(bitValue) << bitPosition
+	}
+
+	return assembledValue, true
+}
+
+// readUnaryEncodedValue decodes a sequence of one bits terminated by a zero bit within remaining bits.
+func (streamReader *bitStreamReader) readUnaryEncodedValue() (uint64, bool) {
+	var unaryCount uint64
+
+	maxUnaryLength := streamReader.remainingBits()
+
+	for unaryCount < maxUnaryLength {
+		bitValue, ok := streamReader.readSingleBit()
+
+		if !ok {
+			return 0, false
+		}
+
+		if bitValue == 0 {
+			return unaryCount, true
+		}
+
+		unaryCount++
+	}
+
+	return 0, false
+}
+
+// readGolombRiceEncodedValue decodes a Golomb-Rice value using the supplied Rice parameter.
+func (streamReader *bitStreamReader) readGolombRiceEncodedValue(riceParameter uint8) (uint64, bool) {
+	// Defensively reject invalid Rice parameters above 63.
+	if riceParameter > 63 {
+		return 0, false
+	}
+
+	quotientValue, ok := streamReader.readUnaryEncodedValue()
+
+	if !ok {
+		return 0, false
+	}
+
+	remainderValue, ok := streamReader.readLeastSignificantBits(riceParameter)
+
+	if !ok {
+		return 0, false
+	}
+
+	return (quotientValue << riceParameter) | remainderValue, true
+}</code></pre>
+
+                <h4 class="fw-bold mt-4">golombcodedset &gt; bit_stream_writer.go</h4>
+                <pre class="rounded-3"><code class="language-go">package golombcodedset
+
+// bitStreamWriter encodes least-significant-bit-first values into a compact byte buffer.
+type bitStreamWriter struct {
+	buffer        []byte
+	currentByte   uint8
+	bitsInCurrent uint8
+}
+
+// newBitStreamWriter allocates a bit stream writer with preallocated buffer capacity.
+func newBitStreamWriter() *bitStreamWriter {
+	return &bitStreamWriter{
+		buffer: make([]byte, 0, 128),
+	}
+}
+
+// writeSingleBit appends a single bit in least-significant-bit-first order.
+func (streamWriter *bitStreamWriter) writeSingleBit(bitValue uint8) {
+	// Defensively guard against an invalid bit counter state.
+	if streamWriter == nil || streamWriter.bitsInCurrent >= 8 {
+		panic("bit stream writer invalid bit state")
+	}
+
+	if bitValue != 0 {
+		streamWriter.currentByte |= 1 << streamWriter.bitsInCurrent
+	}
+
+	streamWriter.bitsInCurrent++
+
+	if streamWriter.bitsInCurrent == 8 {
+		streamWriter.buffer = append(streamWriter.buffer, streamWriter.currentByte)
+		streamWriter.currentByte = 0
+		streamWriter.bitsInCurrent = 0
+	}
+}
+
+// writeLeastSignificantBits writes bitCount least-significant bits from value.
+func (streamWriter *bitStreamWriter) writeLeastSignificantBits(value uint64, bitCount uint8) {
+	// Defensively ignore bit counts exceeding 63 bits.
+	if streamWriter == nil || bitCount > 63 {
+		return
+	}
+
+	for bitPosition := uint8(0); bitPosition < bitCount; bitPosition++ {
+		streamWriter.writeSingleBit(uint8((value >> bitPosition) & 1))
+	}
+}
+
+// writeUnaryEncodedValue writes value ones followed by a zero terminator bit.
+func (streamWriter *bitStreamWriter) writeUnaryEncodedValue(value uint64) {
+	if streamWriter == nil {
+		return
+	}
+
+	for step := uint64(0); step < value; step++ {
+		streamWriter.writeSingleBit(1)
+	}
+
+	streamWriter.writeSingleBit(0)
+}
+
+// writeGolombRiceEncodedValue encodes value using quotient/remainder split defined by riceParameter.
+func (streamWriter *bitStreamWriter) writeGolombRiceEncodedValue(value uint64, riceParameter uint8) {
+	// Defensively reject Rice parameters above 63.
+	if streamWriter == nil || riceParameter > 63 {
+		return
+	}
+
+	quotientValue := value >> riceParameter
+	remainderMask := (uint64(1) << riceParameter) - 1
+	remainderValue := value & remainderMask
+
+	streamWriter.writeUnaryEncodedValue(quotientValue)
+	streamWriter.writeLeastSignificantBits(remainderValue, riceParameter)
+}
+
+// finalize flushes any partial byte and returns the completed encoded slice.
+func (streamWriter *bitStreamWriter) finalize() []byte {
+	if streamWriter == nil {
+		return nil
+	}
+
+	if streamWriter.bitsInCurrent != 0 {
+		streamWriter.buffer = append(streamWriter.buffer, streamWriter.currentByte)
+	}
+
+	return streamWriter.buffer
+}</code></pre>
+
+                <h4 class="fw-bold mt-4">golombcodedset &gt; golomb_coded_set.go</h4>
+                <pre class="rounded-3"><code class="language-go">package golombcodedset
+
+import (
+	"encoding/binary"
+	"errors"
+	"sort"
+)
+
+// GolombCodedSet stores a compact probabilistic set over static 64-bit hash values.
+type GolombCodedSet struct {
+	riceParameter uint8
+	elementCount  uint32
+	encodedBits   []byte
+}
+
+// MarshalBinary serializes the GolombCodedSet header and encoded bitstream into bytes.
+func (codedSet *GolombCodedSet) MarshalBinary() []byte {
+	if codedSet == nil {
+		return nil
+	}
+
+	serializedOutput := make([]byte, 0, 5+len(codedSet.encodedBits))
+	serializedOutput = append(serializedOutput, codedSet.riceParameter)
+
+	var countBytes [4]byte
+
+	binary.LittleEndian.PutUint32(countBytes[:], codedSet.elementCount)
+
+	serializedOutput = append(serializedOutput, countBytes[:]...)
+	serializedOutput = append(serializedOutput, codedSet.encodedBits...)
+
+	return serializedOutput
+}
+
+// UnmarshalGolombCodedSet reconstructs a GolombCodedSet from its serialized binary bytes.
+func UnmarshalGolombCodedSet(rawBytes []byte) (*GolombCodedSet, error) {
+	// Defensively require at least a 5-byte header (1-byte Rice parameter + 4-byte count).
+	if len(rawBytes) < 5 {
+		return nil, errors.New("golomb coded set invalid encoding")
+	}
+
+	riceParameter := rawBytes[0]
+
+	if riceParameter > 63 {
+		return nil, errors.New("golomb coded set invalid rice parameter")
+	}
+
+	parsedCount := binary.LittleEndian.Uint32(rawBytes[1:5])
+	copiedBits := append([]byte(nil), rawBytes[5:]...)
+
+	return &GolombCodedSet{
+		riceParameter: riceParameter,
+		elementCount:  parsedCount,
+		encodedBits:   copiedBits,
+	}, nil
+}
+
+// BuildGolombCodedSet constructs a GolombCodedSet from uniformly distributed 64-bit hashes.
+func BuildGolombCodedSet(riceParameter uint8, hashedValues []uint64) (*GolombCodedSet, error) {
+	// Defensively validate the Rice parameter before computing range bounds.
+	if riceParameter > 63 {
+		return nil, errors.New("golomb coded set invalid rice parameter")
+	}
+
+	itemCount := uint32(len(hashedValues))
+
+	if itemCount == 0 {
+		return &GolombCodedSet{
+			riceParameter: riceParameter,
+			elementCount:  0,
+			encodedBits:   nil,
+		}, nil
+	}
+
+	rangeMultiplier := uint64(1) << riceParameter
+	valueRangeLimit := uint64(itemCount) * rangeMultiplier
+
+	if valueRangeLimit == 0 {
+		return nil, errors.New("golomb coded set invalid value range limit")
+	}
+
+	reducedValues := make([]uint64, 0, itemCount)
+
+	for _, hashEntry := range hashedValues {
+		reducedValues = append(reducedValues, fastRangeReduction(hashEntry, valueRangeLimit))
+	}
+
+	sort.Slice(reducedValues, func(leftIdx int, rightIdx int) bool {
+		return reducedValues[leftIdx] < reducedValues[rightIdx]
+	})
+
+	deltaSequence := make([]uint64, 0, itemCount)
+
+	var priorValue uint64
+
+	for emtryIndex, currentValue := range reducedValues {
+		if emtryIndex == 0 {
+			deltaSequence = append(deltaSequence, currentValue)
+		} else {
+			deltaSequence = append(deltaSequence, currentValue-priorValue)
+		}
+
+		priorValue = currentValue
+	}
+
+	bitWriter := newBitStreamWriter()
+
+	for _, deltaValue := range deltaSequence {
+		bitWriter.writeGolombRiceEncodedValue(deltaValue, riceParameter)
+	}
+
+	return &GolombCodedSet{
+		riceParameter: riceParameter,
+		elementCount:  itemCount,
+		encodedBits:   bitWriter.finalize(),
+	}, nil
+}
+
+// Match tests whether hashedValue is present in the GolombCodedSet.
+func (codedSet *GolombCodedSet) Match(hashedValue uint64) bool {
+	// Defensively guard against a nil receiver or empty set.
+	if codedSet == nil || codedSet.elementCount == 0 {
+		return false
+	}
+
+	if codedSet.riceParameter > 63 || len(codedSet.encodedBits) == 0 {
+		return false
+	}
+
+	rangeMultiplier := uint64(1) << codedSet.riceParameter
+	valueRangeLimit := uint64(codedSet.elementCount) * rangeMultiplier
+
+	if valueRangeLimit == 0 {
+		return false
+	}
+
+	targetSlotValue := fastRangeReduction(hashedValue, valueRangeLimit)
+	bitReader := newBitStreamReader(codedSet.encodedBits)
+
+	var accumulatedSlotValue uint64
+
+	for decodedIdx := uint32(0); decodedIdx < codedSet.elementCount; decodedIdx++ {
+		if !bitReader.hasRemainingBits() {
+			return false
+		}
+
+		deltaValue, ok := bitReader.readGolombRiceEncodedValue(codedSet.riceParameter)
+
+		if !ok {
+			return false
+		}
+
+		accumulatedSlotValue += deltaValue
+
+		if accumulatedSlotValue >= valueRangeLimit {
+			return false
+		}
+
+		if accumulatedSlotValue == targetSlotValue {
+			return true
+		}
+
+		if accumulatedSlotValue > targetSlotValue {
+			return false
+		}
+	}
+
+	return false
+}</code></pre>
+
+                <h4 class="fw-bold mt-4">golombcodedset &gt; golomb_coded_set_test.go</h4>
+                <pre class="rounded-3"><code class="language-go">package golombcodedset
+
+import (
+	"bytes"
+	"testing"
+)
+
+func TestMultiplyUint64Product(test *testing.T) {
+	if test == nil {
+		return
+	}
+
+	const multiplicand uint64 = 0xFFFFFFFFFFFFFFFF
+	const multiplier uint64 = 2
+
+	upperHalf, lowerHalf := multiplyUint64(multiplicand, multiplier)
+
+	if lowerHalf != 0xFFFFFFFFFFFFFFFE {
+		test.Fatalf("unexpected lower 64 bits: %x\n", lowerHalf)
+	}
+
+	if upperHalf != 1 {
+		test.Fatalf("unexpected upper 64 bits: %x\n", upperHalf)
+	}
+}
+
+func TestFastRangeReductionBounds(test *testing.T) {
+	if test == nil {
+		return
+	}
+
+	const rangeLimit uint64 = 1000
+
+	sampleHashes := []uint64{0, 1, 42, 123456789, 0xFFFFFFFFFFFFFFFF}
+
+	for _, rawHash := range sampleHashes {
+		reducedSlot := fastRangeReduction(rawHash, rangeLimit)
+		if reducedSlot >= rangeLimit {
+			test.Fatalf("reduced value %d out of bounds for limit %d\n", reducedSlot, rangeLimit)
+		}
+	}
+}
+
+func TestBuildAndMatchMembership(test *testing.T) {
+	if test == nil {
+		return
+	}
+
+	const riceParameter uint8 = 10
+
+	memberHashes := []uint64{
+		0x0123456789ABCDEF,
+		0x1111111111111111,
+		0x2222222222222222,
+		0x3333333333333333,
+		0x4444444444444444,
+	}
+
+	codedSet, buildError := BuildGolombCodedSet(riceParameter, memberHashes)
+
+	if buildError != nil {
+		test.Fatalf("unexpected build error: %v\n", buildError)
+	}
+
+	for _, presentHash := range memberHashes {
+		if !codedSet.Match(presentHash) {
+			test.Fatalf("expected present hash %x to match\n", presentHash)
+		}
+	}
+
+	const absentHash uint64 = 0x9999999999999999
+
+	if codedSet.Match(absentHash) {
+		test.Fatalf("unexpected match for absent hash %x\n", absentHash)
+	}
+}
+
+func TestMarshalUnmarshalRoundTrip(test *testing.T) {
+	if test == nil {
+		return
+	}
+
+	const riceParameter uint8 = 8
+
+	memberHashes := []uint64{0xAAAAAAAAAAAAAAAA, 0xBBBBBBBBBBBBBBBB, 0xCCCCCCCCCCCCCCCC}
+
+	originalSet, buildError := BuildGolombCodedSet(riceParameter, memberHashes)
+
+	if buildError != nil {
+		test.Fatalf("unexpected build error: %v\n", buildError)
+	}
+
+	encodedBytes := originalSet.MarshalBinary()
+	restoredSet, decodeError := UnmarshalGolombCodedSet(encodedBytes)
+
+	if decodeError != nil {
+		test.Fatalf("unexpected decode error: %v\n", decodeError)
+	}
+
+	for _, expectedHash := range memberHashes {
+		if !restoredSet.Match(expectedHash) {
+			test.Fatalf("expected hash %x missing after round-trip\n", expectedHash)
+		}
+	}
+}
+
+func TestEmptySetBehavior(test *testing.T) {
+	if test == nil {
+		return
+	}
+
+	emptySet, buildError := BuildGolombCodedSet(5, nil)
+
+	if buildError != nil {
+		test.Fatalf("unexpected build error on empty set: %v\n", buildError)
+	}
+
+	if emptySet.Match(0x1234567890ABCDEF) {
+		test.Fatalf("empty set should not match any value\n")
+	}
+
+	if len(emptySet.MarshalBinary()) == 0 {
+		test.Fatalf("expected serialized header bytes for empty set\n")
+	}
+}
+
+func TestBitStreamRoundTrip(test *testing.T) {
+	if test == nil {
+		return
+	}
+
+	const riceParameter uint8 = 6
+	inputValues := []uint64{0, 1, 5, 17, 64, 255}
+
+	bitWriter := newBitStreamWriter()
+
+	for _, itemValue := range inputValues {
+		bitWriter.writeGolombRiceEncodedValue(itemValue, riceParameter)
+	}
+
+	bitReader := newBitStreamReader(bitWriter.finalize())
+
+	for _, expectedValue := range inputValues {
+		decodedValue, ok := bitReader.readGolombRiceEncodedValue(riceParameter)
+
+		if !ok {
+			test.Fatalf("failed decoding value %d\n", expectedValue)
+		}
+
+		if decodedValue != expectedValue {
+			test.Fatalf("decoded value %d != expected %d\n", decodedValue, expectedValue)
+		}
+	}
+}
+
+func TestUnmarshalRejectsMalformedHeader(test *testing.T) {
+	if test == nil {
+		return
+	}
+
+	restoredSet, decodeError := UnmarshalGolombCodedSet([]byte{0xFF})
+
+	if decodeError == nil {
+		test.Fatalf("expected error for malformed header, got set %v\n", restoredSet)
+	}
+}
+
+func TestDeterministicSerialization(test *testing.T) {
+	if test == nil {
+		return
+	}
+
+	const riceParameter uint8 = 7
+
+	memberHashes := []uint64{0xDEADBEEFDEADBEEF, 0xCAFEBABECAFEBABE}
+
+	firstSet, _ := BuildGolombCodedSet(riceParameter, memberHashes)
+	secondSet, _ := BuildGolombCodedSet(riceParameter, memberHashes)
+
+	if !bytes.Equal(firstSet.MarshalBinary(), secondSet.MarshalBinary()) {
+		test.Fatalf("expected deterministic serialization output\n")
+	}
+}</code></pre>
+
+                <h4 class="fw-bold mt-4">golombcodedset &gt; golomb_coded_set_fuzz_test.go (Native Go Fuzzing)</h4>
+                <pre class="rounded-3"><code class="language-go">package golombcodedset
+
+import (
+	"encoding/binary"
+	"testing"
+)
+
+// FuzzUnmarshalGolombCodedSet fuzzes binary unmarshaling and membership matching against arbitrary inputs.
+func FuzzUnmarshalGolombCodedSet(fuzz *testing.F) {
+	if fuzz == nil {
+		return
+	}
+
+	validSet, buildError := BuildGolombCodedSet(8, []uint64{100, 200, 300, 400})
+
+	if buildError == nil {
+		fuzz.Add(validSet.MarshalBinary())
+	}
+
+	fuzz.Add([]byte{})
+	fuzz.Add([]byte{0x00})
+	fuzz.Add([]byte{0xFF, 0x00, 0x00, 0x00, 0x00})
+	fuzz.Add([]byte{0x08, 0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF})
+
+	fuzz.Fuzz(func(test *testing.T, candidateBytes []byte) {
+		decodedSet, decodeError := UnmarshalGolombCodedSet(candidateBytes)
+
+		if decodeError != nil {
+			return
+		}
+
+		if decodedSet != nil {
+			_ = decodedSet.Match(12345)
+		}
+	})
+}
+
+// FuzzBuildGolombCodedSet fuzzes set construction with arbitrary Rice parameters and hash slices.
+func FuzzBuildGolombCodedSet(fuzz *testing.F) {
+	if fuzz == nil {
+		return
+	}
+
+	fuzz.Add(uint8(8), []byte{0xEF, 0xBE, 0xAD, 0xDE, 0xEF, 0xBE, 0xAD, 0xDE})
+	fuzz.Add(uint8(100), []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07})
+
+	fuzz.Fuzz(func(test *testing.T, riceParameter uint8, rawHashBytes []byte) {
+		hashCount := len(rawHashBytes) / 8
+		parsedHashes := make([]uint64, 0, hashCount)
+
+		for byteOffset := 0; byteOffset+8 <= len(rawHashBytes); byteOffset += 8 {
+			hashValue := binary.LittleEndian.Uint64(rawHashBytes[byteOffset : byteOffset+8])
+			parsedHashes = append(parsedHashes, hashValue)
+		}
+
+		_, _ = BuildGolombCodedSet(riceParameter, parsedHashes)
+	})
+}
+
+// FuzzBitStreamReader fuzzes bit stream decoding against arbitrary bitstreams and Rice parameters.
+func FuzzBitStreamReader(fuzz *testing.F) {
+	if fuzz == nil {
+		return
+	}
+
+	fuzz.Add([]byte{0xAA, 0x55, 0xFF, 0x00}, uint8(4))
+	fuzz.Add([]byte{}, uint8(0))
+
+	fuzz.Fuzz(func(test *testing.T, encodedStream []byte, riceParameter uint8) {
+		bitReader := newBitStreamReader(encodedStream)
+
+		for bitReader.hasRemainingBits() {
+			_, _ = bitReader.readGolombRiceEncodedValue(riceParameter)
+		}
+	})
+}</code></pre>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Key Takeaways Callout -->
+            <div class="card bg-body-tertiary border shadow-sm rounded-3 mb-4 p-4">
+                <h5 class="fw-bold mb-3">
+                    <i class="bi bi-journal-code me-2"></i>Key Takeaways
+                </h5>
+                <ul class="mb-0">
+                    <li class="mb-2">
+                        <strong>Race-Condition Validation:</strong> Run concurrent test suites under <code>go test -race</code> to catch
+                        unsynchronized shared memory access and data races early.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Allocation Budgeting:</strong> Use <code>testing.B</code> with <code>ReportAllocs()</code> to verify
+                        zero heap allocations (<code>allocs/op = 0</code>) across hot-path operations.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Defensive Bit &amp; Binary Parsing:</strong> Validate headers, Rice parameters, and remaining bit budgets
+                        so malformed streams fail cleanly without panics or infinite loops.
+                    </li>
+                    <li class="mb-0">
+                        <strong>Native Property Fuzzing:</strong> Use <code>testing.F</code> with diverse seed corpora to uncover edge cases
+                        and harden parsers against adversarial byte sequences.
+                    </li>
+                </ul>
+            </div>
+
+            <hr class="my-4">
+            <div class="mb-3">
+                <a href="../components/11_chapter.html" class="btn btn-info float-end text-white">
+                    Chapter 11 <i class="bi bi-arrow-right me-1"></i>
+                </a>
+                <a href="../components/09_chapter.html" class="btn btn-secondary text-white">
+                    <i class="bi bi-arrow-left me-1"></i> Chapter 9
+                </a>
+            </div>
+            <br>
+        </main>
+
+        <!-- Bootstrap 5 JavaScript Bundle -->
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+                integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+                crossorigin="anonymous"></script>
+
+        <!-- Prism.js Core & Auto-Loader for Go Syntax Support -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+
+        <!-- Custom JavaScript -->
+        <script src="../script.js"></script>
+    </body>
+</html>

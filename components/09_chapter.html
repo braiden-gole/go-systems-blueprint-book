@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="light dark">
+        <meta name="description" content="A comprehensive guide and blueprint for building high-performance, scalable systems in Go by Braiden Gole." />
+        <meta name="author" content="Braiden Gole" />
+        <meta name="robots" content="index, follow" />
+
+        <!-- Open Graph Social Preview Tags -->
+        <meta property="og:title" content="Go Systems Blueprint | Braiden Gole" />
+        <meta property="og:description" content="A comprehensive guide and blueprint for building high-performance, scalable systems in Go by Braiden Gole." />
+        <meta property="og:type" content="website" />
+        <meta property="og:url" content="https://braiden-gole.github.io/go-systems-blueprint-book/" />
+        <meta property="og:image" content="images/circle.png?v=2" />
+        <meta property="og:image:width" content="180" />
+        <meta property="og:image:height" content="180" />
+        
+        <title>Chapter 9: State Persistence & Performance Profiling | Go Systems Blueprint</title>
+
+        <!-- Primary Browser Tab Favicons (Circle Variant) -->
+        <link rel="icon" type="image/x-icon" href="../images/circle.ico?v=20">
+        <link rel="icon" type="image/png" sizes="32x32" href="../images/circle.png?v=20">
+        <link rel="icon" type="image/png" sizes="16x16" href="../images/circle.png?v=20">
+
+        <!-- Apple & General Shortcut Icon Declarations (Square Variant) -->
+        <link rel="apple-touch-icon" sizes="180x180" href="../images/square.png?v=20">
+
+        <!-- Bootstrap 5 CSS -->
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+              rel="stylesheet"
+              integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+              crossorigin="anonymous">
+        
+        <!-- Bootstrap Icons -->
+        <link rel="stylesheet"
+              href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+        <!-- Adaptive GitHub Theme for Prism.js (Switches automatically via media query) -->
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prism-theme-github/themes/prism-theme-github-light.css" media="(prefers-color-scheme: light)">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prism-theme-github/themes/prism-theme-github-dark.css" media="(prefers-color-scheme: dark)">
+
+        <!-- Custom CSS -->
+        <link rel="stylesheet" href="../stylesheets/main.css">
+        <link rel="stylesheet" href="../stylesheets/style.css">
+    </head>
+    <body>
+        <main class="container" style="max-width: 900px;">
+            <header class="text-start mb-5">
+                <div class="d-flex align-items-center mb-3">
+                    <div style="width: 60px; height: 60px; flex-shrink: 0;">
+                        <canvas id="golang-canvas" style="display: block; width: 100%; height: 100%;"></canvas>
+                    </div>
+                    <h1 class="display-5 fw-bold mb-0">State Persistence & Performance</h1>
+                </div>
+
+                <p class="lead fw-semibold mx-auto">
+                    Welcome to Chapter 9 of the <strong>Go Systems Blueprint</strong>.
+                    Building upon the low-level IPC and socket patterns examined in Chapter 8,
+                    reliable state persistence and runtime profiling eliminate syscall overhead, GC churn, and concurrency bottlenecks.
+                </p>
+
+                <p class="small">
+                    This chapter covers memory-mapped file persistence (<code>mmap</code> and <code>msync</code>), zero-copy struct casting,
+                    and live runtime diagnostics via <code>net/http/pprof</code> under high-concurrency workloads.
+                </p>
+            </header>
+
+            <hr class="my-4">
+
+            <!-- Section 9.1 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    9.1 Zero-Copy State Persistence via Memory-Mapped File (<code>mmap</code>)
+                </h2>
+                <p>
+                    Memory-mapped files bridge virtual memory and disk storage, allowing a process to read and write file contents
+                    directly through memory pointers. Modifying mapped memory lets the kernel manage paging while explicit
+                    <code>msync</code> calls flush dirty pages to disk when durability is required.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"syscall"
+	"unsafe"
+)
+
+// MappedStore represents a zero-copy memory-mapped file persistence region.
+type MappedStore struct {
+	file   *os.File
+	memory []byte
+	size   int64
+}
+
+// NewMappedStore opens or creates a file of the specified size and memory-maps it into process address space.
+func NewMappedStore(storeFilePath string, storeSize int64) (*MappedStore, error) {
+	// Defensively check that the store file path is not empty.
+	if storeFilePath == "" {
+		return nil, errors.New("error: store file path cannot be empty")
+	}
+
+	// Defensively check that the mapped byte size is positive.
+	if storeSize <= 0 {
+		return nil, errors.New("error: store size must be greater than zero")
+	}
+
+	// Defensively check that the requested size fits safely within int for syscall.Mmap.
+	if storeSize > int64(^uint(0)>>1) {
+		return nil, errors.New("error: store size exceeds maximum addressable buffer length")
+	}
+
+	storeFile, openError := os.OpenFile(storeFilePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+
+	if openError != nil {
+		return nil, fmt.Errorf("failed to open store file %s: %w", storeFilePath, openError)
+	}
+
+	// Reserve exact backing storage capacity before mapping into virtual address space.
+	if truncateError := storeFile.Truncate(storeSize); truncateError != nil {
+		_ = storeFile.Close()
+
+		return nil, fmt.Errorf("failed to truncate store file %s: %w", storeFilePath, truncateError)
+	}
+
+	mappedBytes, mmapError := syscall.Mmap(
+		int(storeFile.Fd()),
+		0,
+		int(storeSize),
+		syscall.PROT_READ|syscall.PROT_WRITE,
+		syscall.MAP_SHARED,
+	)
+
+	if mmapError != nil {
+		_ = storeFile.Close()
+		return nil, fmt.Errorf("failed to memory-map store file %s: %w", storeFilePath, mmapError)
+	}
+
+	return &MappedStore{
+		file:   storeFile,
+		memory: mappedBytes,
+		size:   storeSize,
+	}, nil
+}
+
+// WriteAt copies data directly into the memory-mapped byte slice at the given offset.
+func (store *MappedStore) WriteAt(payload []byte, writeOffset int64) error {
+	// Defensively guard against a nil store or uninitialized mapping.
+	if store == nil || len(store.memory) == 0 {
+		return errors.New("error: mapped store is not initialized")
+	}
+
+	// Defensively reject negative offsets.
+	if writeOffset < 0 {
+		return errors.New("error: write offset cannot be negative")
+	}
+
+	payloadLength := int64(len(payload))
+    
+	if payloadLength == 0 {
+		return nil
+	}
+
+	// Defensively prevent out-of-bounds writes past the mapped region.
+	if writeOffset > store.size || payloadLength > store.size-writeOffset {
+		return errors.New("error: write exceeds mapped region size")
+	}
+
+	copy(store.memory[writeOffset:], payload)
+
+	return nil
+}
+
+// Sync flushes dirty memory pages back to disk storage synchronously.
+func (store *MappedStore) Sync() error {
+	// Defensively guard against a nil store or uninitialized mapping.
+	if store == nil || len(store.memory) == 0 {
+		return errors.New("error: mapped store is not initialized")
+	}
+
+	_, _, msyncErrno := syscall.Syscall(
+		syscall.SYS_MSYNC,
+		uintptr(unsafe.Pointer(&store.memory[0])),
+		uintptr(store.size),
+		uintptr(syscall.MS_SYNC),
+	)
+
+	if msyncErrno != 0 {
+		return fmt.Errorf("msync failed with errno: %d", msyncErrno)
+	}
+
+	return nil
+}
+
+// Close unmaps the virtual memory region and closes the underlying file descriptor.
+func (store *MappedStore) Close() error {
+	// Defensively guard against closing a nil store.
+	if store == nil {
+		return errors.New("error: mapped store cannot be nil")
+	}
+
+	var combinedErrors []error
+
+	if len(store.memory) > 0 {
+		if munmapError := syscall.Munmap(store.memory); munmapError != nil {
+			combinedErrors = append(combinedErrors, fmt.Errorf("failed to unmap memory: %w", munmapError))
+		}
+
+		store.memory = nil
+	}
+
+	if store.file != nil {
+		if closeError := store.file.Close(); closeError != nil {
+			combinedErrors = append(combinedErrors, fmt.Errorf("failed to close store file: %w", closeError))
+		}
+
+		store.file = nil
+	}
+
+	return errors.Join(combinedErrors...)
+}</code></pre>
+
+                <!-- Media-adaptive Memory-Mapped File Architecture Diagram -->
+                <div class="text-center my-4">
+                    <p class="small text-secondary mb-2">Figure 9.1: Memory-Mapped File Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/memory-mapped-file-architecture-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/memory-mapped-file-architecture-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/memory-mapped-file-architecture-light.png" alt="Memory-Mapped File Architecture Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 9.2 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    9.2 Zero-Copy Struct Casting via Unsafe Pointers
+                </h2>
+                <p>
+                    Because <code>MappedStore</code> provides a contiguous mapped byte region, fixed-width value structs can be read
+                    and written directly without serialization allocations. Keep records strictly pointer-free with explicit alignment padding.
+                </p>
+                <div class="alert alert-warning border shadow-sm rounded-3 my-3 p-3">
+                    <h6 class="alert-heading fw-bold mb-1"><i class="bi bi-exclamation-triangle-fill me-2"></i>Production Warning</h6>
+                    <p class="mb-0 small">
+                        Zero-copy struct casting requires fixed-width primitive fields, explicit alignment padding, and consistent host endianness.
+                        Never include pointers, strings, or slices inside a struct cast directly from mapped memory.
+                    </p>
+                </div>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"unsafe"
+)
+
+// LogRecord represents a fixed-size transactional entry suitable for zero-copy memory mapping.
+type LogRecord struct {
+	RecordID  uint64
+	Timestamp int64
+	Flags     uint32
+
+    // Explicit padding keeps struct size aligned to 8 bytes.
+	_         uint32
+}
+
+const logRecordByteSize = int64(unsafe.Sizeof(LogRecord{}))
+
+// ReadRecord performs zero-copy retrieval of a LogRecord at the given slot index.
+func (store *MappedStore) ReadRecord(slotIndex int64) (*LogRecord, error) {
+	// Defensively guard against a nil store or uninitialized mapping.
+	if store == nil || len(store.memory) == 0 {
+		return nil, errors.New("error: mapped store is not initialized")
+	}
+
+	// Defensively reject negative slot indices.
+	if slotIndex < 0 {
+		return nil, errors.New("error: record slot index cannot be negative")
+	}
+
+	byteOffset := slotIndex * logRecordByteSize
+
+	if byteOffset < 0 || byteOffset > store.size || logRecordByteSize > store.size-byteOffset {
+		return nil, errors.New("error: read offset out of bounds")
+	}
+
+	return (*LogRecord)(unsafe.Pointer(&store.memory[byteOffset])), nil
+}
+
+// WriteRecord writes a LogRecord directly into the mapped memory slot at slotIndex.
+func (store *MappedStore) WriteRecord(slotIndex int64, entry LogRecord) error {
+	// Defensively guard against a nil store or uninitialized mapping.
+	if store == nil || len(store.memory) == 0 {
+		return errors.New("error: mapped store is not initialized")
+	}
+
+	// Defensively reject negative slot indices.
+	if slotIndex < 0 {
+		return errors.New("error: record slot index cannot be negative")
+	}
+
+	byteOffset := slotIndex * logRecordByteSize
+
+	if byteOffset < 0 || byteOffset > store.size || logRecordByteSize > store.size-byteOffset {
+		return errors.New("error: write offset out of bounds")
+	}
+
+	targetSlot := (*LogRecord)(unsafe.Pointer(&store.memory[byteOffset]))
+	*targetSlot = entry
+
+	return nil
+}</code></pre>
+
+                <!-- Media-adaptive Zero-Copy Memory Mapping Diagram -->
+                <div class="text-center my-4">
+                    <p class="small text-secondary mb-2">Figure 9.2: Zero-Copy Memory Mapping Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/zero-copy-memory-mapping-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/zero-copy-memory-mapping-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/zero-copy-memory-mapping-light.png" alt="Zero-Copy Memory Mapping Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Section 9.3 -->
+            <section class="mb-5">
+                <h2 class="fw-bold mb-3">
+                    9.3 Runtime Profiling and Concurrency Diagnostics (<code>pprof</code>)
+                </h2>
+                <p>
+                    Concurrent writes into shared mapped memory must partition disjoint slots per worker to avoid data races while
+                    exposing <code>net/http/pprof</code> on a dedicated internal loop to inspect CPU, heap, and goroutine profiles live.
+                </p>
+
+                <pre class="rounded-3"><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	_ "net/http/pprof"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// WorkloadTelemetry captures runtime metrics and profiling configuration for a concurrent store run.
+type WorkloadTelemetry struct {
+	CompletedRecordWrites int64
+	ElapsedDuration       time.Duration
+	RecordsPerSecond      float64
+}
+
+// ConfigureRuntimeProfiling enables mutex and block contention sampling for live pprof inspection.
+func ConfigureRuntimeProfiling(mutexProfileFraction int, blockProfileRateNanoseconds int) error {
+	// Defensively reject negative sampling fractions for mutex profiling.
+	if mutexProfileFraction < 0 {
+		return errors.New("error: mutex profile fraction cannot be negative")
+	}
+
+	// Defensively reject negative block profiling intervals.
+	if blockProfileRateNanoseconds < 0 {
+		return errors.New("error: block profile rate cannot be negative")
+	}
+
+	// Setting a positive fraction records every 1/Nth mutex contention event in pprof mutex profiles.
+	runtime.SetMutexProfileFraction(mutexProfileFraction)
+
+	// Setting a positive rate records goroutine blocking events exceeding the threshold in nanoseconds.
+	runtime.SetBlockProfileRate(blockProfileRateNanoseconds)
+
+	return nil
+}
+
+// RunConcurrentStoreWorkload executes partitioned zero-copy writes while serving live pprof endpoints.
+func RunConcurrentStoreWorkload(
+	workloadContext context.Context,
+	mappedStore *MappedStore,
+	diagnosticListenAddress string,
+	workerGoroutineCount int,
+	recordsPerWorker int64,
+) (WorkloadTelemetry, error) {
+	// Defensively validate that the workload context is not nil.
+	if workloadContext == nil {
+		return WorkloadTelemetry{}, errors.New("error: workload context cannot be nil")
+	}
+
+	// Defensively validate that the memory-mapped store and its buffer are initialized.
+	if mappedStore == nil || len(mappedStore.memory) == 0 {
+		return WorkloadTelemetry{}, errors.New("error: mapped store is nil or uninitialized")
+	}
+
+	// Defensively validate that the diagnostic HTTP bind address is non-empty.
+	if diagnosticListenAddress == "" {
+		return WorkloadTelemetry{}, errors.New("error: diagnostic listen address cannot be empty")
+	}
+
+	// Defensively validate positive worker count and per-worker operation count.
+	if workerGoroutineCount <= 0 {
+		return WorkloadTelemetry{}, errors.New("error: worker goroutine count must be greater than zero")
+	}
+
+	if recordsPerWorker <= 0 {
+		return WorkloadTelemetry{}, errors.New("error: records per worker must be greater than zero")
+	}
+
+	// Defensively guard against integer overflow when computing total required slots.
+	if workerGoroutineCount > int((^uint64(0)>>1)/uint64(recordsPerWorker)) {
+		return WorkloadTelemetry{}, errors.New("error: total partitioned record slots overflow int64 capacity")
+	}
+
+	totalRequiredSlots := int64(workerGoroutineCount) * recordsPerWorker
+	totalRequiredBytes := totalRequiredSlots * logRecordByteSize
+
+	if totalRequiredBytes < 0 || totalRequiredBytes > mappedStore.size {
+		return WorkloadTelemetry{}, fmt.Errorf(
+			"error: partitioned workload requires %d bytes, exceeding mapped store size of %d bytes",
+			totalRequiredBytes,
+			mappedStore.size,
+		)
+	}
+
+	// Enable contention profiling so CPU, heap, goroutine, mutex, and block profiles are available live.
+	if profileConfigError := ConfigureRuntimeProfiling(1, 1000); profileConfigError != nil {
+		return WorkloadTelemetry{}, fmt.Errorf("failed to configure runtime profiling: %w", profileConfigError)
+	}
+	defer func() {
+		// Restore contention profiling rates to zero on exit to avoid ongoing overhead in host processes.
+		runtime.SetMutexProfileFraction(0)
+		runtime.SetBlockProfileRate(0)
+	}()
+
+	// Bind the TCP listener explicitly before spawning the server goroutine so readiness is deterministic.
+	diagnosticListener, listenError := net.Listen("tcp", diagnosticListenAddress)
+	if listenError != nil {
+		return WorkloadTelemetry{}, fmt.Errorf("failed to bind pprof listener on %s: %w", diagnosticListenAddress, listenError)
+	}
+
+	diagnosticHttpServer := &http.Server{
+		Handler:           http.DefaultServeMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	diagnosticServerErrorChannel := make(chan error, 1)
+
+	// Schedule graceful shutdown of the pprof server when the workload context is canceled.
+	cancelDiagnosticWatcher := context.AfterFunc(workloadContext, func() {
+		diagnosticShutdownContext, cancelDiagnosticShutdown := context.WithTimeout(context.Background(), 3*time.Second)
+
+		defer cancelDiagnosticShutdown()
+
+		if shutdownError := diagnosticHttpServer.Shutdown(diagnosticShutdownContext); shutdownError != nil && !errors.Is(shutdownError, http.ErrServerClosed) {
+			log.Printf("pprof server shutdown warning: %v\n", shutdownError)
+		}
+	})
+	defer cancelDiagnosticWatcher()
+
+	go func() {
+		log.Printf("pprof diagnostics listening on http://%s/debug/pprof/\n", diagnosticListener.Addr().String())
+
+		if serveError := diagnosticHttpServer.Serve(diagnosticListener); serveError != nil && !errors.Is(serveError, http.ErrServerClosed) {
+			diagnosticServerErrorChannel <- fmt.Errorf("pprof diagnostic server failed: %w", serveError)
+		}
+
+		close(diagnosticServerErrorChannel)
+	}()
+
+	var workerWaitGroup sync.WaitGroup
+	var completedWriteCounter atomic.Int64
+
+	workerFailureChannel := make(chan error, workerGoroutineCount)
+
+	workloadStartTime := time.Now()
+
+	const baseEpochSeconds int64 = 1718712300
+
+	// Partition disjoint record index ranges across workers to eliminate concurrent writes to the same slot.
+	for workerOrdinal := 0; workerOrdinal < workerGoroutineCount; workerOrdinal++ {
+		workerWaitGroup.Add(1)
+		partitionStartSlot := int64(workerOrdinal) * recordsPerWorker
+
+		go func(assignedSlot int64) {
+			defer workerWaitGroup.Done()
+
+			for recordSlotOffset := int64(0); recordSlotOffset < recordsPerWorker; recordSlotOffset++ {
+				if workloadContext.Err() != nil {
+					return
+				}
+
+				targetRecordSlot := assignedSlot + recordSlotOffset
+				recordEntry := LogRecord{
+					RecordID:  uint64(targetRecordSlot),
+					Timestamp: baseEpochSeconds + targetRecordSlot,
+					Flags:     1,
+				}
+
+				if writeFailureError := mappedStore.WriteRecord(targetRecordSlot, recordEntry); writeFailureError != nil {
+					select {
+					case workerFailureChannel <- fmt.Errorf("worker slot %d write error: %w", targetRecordSlot, writeFailureError):
+					default:
+					}
+					return
+				}
+
+				completedWriteCounter.Add(1)
+			}
+		}(partitionStartSlot)
+	}
+
+	workerWaitGroup.Wait()
+
+	close(workerFailureChannel)
+
+	for workerFailure := range workerFailureChannel {
+		if workerFailure != nil {
+			return WorkloadTelemetry{}, workerFailure
+		}
+	}
+
+	// Surface any fatal error emitted by the background pprof HTTP listener.
+	select {
+	case serverFailure, channelOpen := <-diagnosticServerErrorChannel:
+		if channelOpen && serverFailure != nil {
+			return WorkloadTelemetry{}, serverFailure
+		}
+	default:
+	}
+
+	// Flush written pages to backing storage once all partitioned worker goroutines complete.
+	if finalSyncError := mappedStore.Sync(); finalSyncError != nil {
+		return WorkloadTelemetry{}, fmt.Errorf("failed to sync mapped store after concurrent workload: %w", finalSyncError)
+	}
+
+	elapsedTime := time.Since(workloadStartTime)
+	totalCompletedWrites := completedWriteCounter.Load()
+
+	var throughputPerSecond float64
+
+	if elapsedTime.Seconds() > 0 {
+		throughputPerSecond = float64(totalCompletedWrites) / elapsedTime.Seconds()
+	}
+
+	return WorkloadTelemetry{
+		CompletedRecordWrites: totalCompletedWrites,
+		ElapsedDuration:       elapsedTime,
+		RecordsPerSecond:      throughputPerSecond,
+	}, nil
+}</code></pre>
+
+                <!-- Media-adaptive Zero-Copy Concurrency Profiling Diagram -->
+                <div class="text-center my-4">
+                    <p class="small text-secondary mb-2">Figure 9.3: Zero-Copy Concurrency Profiling Architecture</p>
+                    <picture>
+                        <source srcset="../documents/images/zero-copy-concurrency-profiling-dark.png" media="(prefers-color-scheme: dark)">
+                        <source srcset="../documents/images/zero-copy-concurrency-profiling-light.png" media="(prefers-color-scheme: light)">
+                        <img src="../documents/images/zero-copy-concurrency-profiling-light.png" alt="Zero-Copy Concurrency Profiling Diagram" class="img-fluid rounded border shadow-sm" style="max-width: 100%; height: auto;">
+                    </picture>
+                </div>
+            </section>
+
+            <hr class="my-4">
+
+            <!-- Key Takeaways Callout -->
+            <div class="card bg-body-tertiary border shadow-sm rounded-3 mb-4 p-4">
+                <h5 class="fw-bold mb-3">
+                    <i class="bi bi-journal-code me-2"></i>Key Takeaways
+                </h5>
+                <ul class="mb-0">
+                    <li class="mb-2">
+                        <strong>Memory-Mapped Files (<code>mmap</code>):</strong> Bridge virtual memory and storage to eliminate explicit
+                        <code>read()</code> and <code>write()</code> syscall overhead for high-speed append-only logs and caches.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Zero-Copy Struct Casting:</strong> Cast byte slices directly into fixed-size pointer-free Go structs
+                        with explicit alignment padding to avoid allocation churn.
+                    </li>
+                    <li class="mb-2">
+                        <strong>Kernel Durability (<code>msync</code>):</strong> Explicitly flush dirty memory pages to disk storage using
+                        <code>syscall.Syscall(syscall.SYS_MSYNC, ...)</code> when crash durability is required.
+                    </li>
+                    <li class="mb-0">
+                        <strong>Runtime Profiling (<code>pprof</code>):</strong> Serve <code>net/http/pprof</code> on a controlled HTTP server
+                        with proper timeouts and shutdown hooks to diagnose CPU, allocation, and goroutine behavior under load.
+                    </li>
+                </ul>
+            </div>
+
+            <hr class="my-4">
+            <div class="mb-3">
+                <a href="../components/10_chapter.html" class="btn btn-info float-end text-white">
+                    Chapter 10 <i class="bi bi-arrow-right me-1"></i>
+                </a>
+                <a href="../components/08_chapter.html" class="btn btn-secondary text-white">
+                    <i class="bi bi-arrow-left me-1"></i> Chapter 8
+                </a>
+            </div>
+            <br>
+        </main>
+
+        <!-- Bootstrap 5 JavaScript Bundle -->
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+                integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+                crossorigin="anonymous"></script>
+
+        <!-- Prism.js Core & Auto-Loader for Go Syntax Support -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+
+        <!-- Custom JavaScript -->
+        <script src="../script.js"></script>
+    </body>
+</html>

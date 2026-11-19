@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <!-- Portfolio Root -->
+  <url>
+    <loc>https://braiden-gole.github.io/</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  
+  <!-- Book Main Page / Table of Contents -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.9</priority>
+  </url>
+
+  <!-- Chapter 1 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/01_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 2 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/02_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 3 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/03_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 4 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/04_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 5 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/05_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 6 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/06_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 7 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/07_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 8 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/08_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 9 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/09_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 10 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/10_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 11 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/11_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 12 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/12_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 13 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/13_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+
+  <!-- Chapter 14 -->
+  <url>
+    <loc>https://braiden-gole.github.io/go-systems-blueprint-book/components/14_chapter.html</loc>
+    <lastmod>2026-11-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+</urlset>
